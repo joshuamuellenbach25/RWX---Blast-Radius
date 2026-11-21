@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 RESULTS = Path("/tmp/blast-results")
+# The run has 2 cores: one child per core.
+PARALLEL_CHILDREN = 2
 
 
 @dataclass
@@ -72,42 +74,52 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             print(f"warm import {module} failed: {error!r}", file=sys.stderr, flush=True)
     index = runner.function_index()
     print(f"warm worker ready in {time.monotonic() - started:.1f} s, {len(index)} functions", file=sys.stderr, flush=True)
-    for job in jobs:
-        remaining = deadline - time.monotonic()
-        if remaining < 5:
-            print(f"{job.commit}: no time left", file=sys.stderr, flush=True)
-            continue
-        budget = min(remaining, 5.0 + sum(_limit(test) for test in job.tests))
-        child = os.fork()
-        if child == 0:
-            code = 0
-            try:
-                try:
-                    with open("/proc/self/oom_score_adj", "w") as handle:
-                        handle.write("1000")
-                except OSError:
-                    pass
-                result = _run_job(job, index)
-                target = RESULTS / f"{job.commit}.json"
-                temporary = target.with_suffix(".tmp")
-                temporary.write_text(json.dumps(result), "utf-8")
-                os.replace(temporary, target)
-            except BaseException as error:  # the parent reads a missing result as no answer
-                print(f"{job.commit}: child failed {error!r}", file=sys.stderr, flush=True)
-                code = 1
-            finally:
-                os._exit(code)
-        child_started = time.monotonic()
-        while True:
-            pid, status = os.waitpid(child, os.WNOHANG)
+    pending = list(jobs)
+    running: dict[int, tuple[Job, float, float]] = {}  # pid -> (job, start, budget)
+    while pending or running:
+        while pending and len(running) < PARALLEL_CHILDREN:
+            job = pending.pop(0)
+            remaining = deadline - time.monotonic()
+            if remaining < 5:
+                print(f"{job.commit}: no time left", file=sys.stderr, flush=True)
+                continue
+            budget = min(remaining, 5.0 + sum(_limit(test) for test in job.tests))
+            child = os.fork()
+            if child == 0:
+                _child_main(job, index)
+            running[child] = (job, time.monotonic(), budget)
+        for child, (job, child_started, budget) in list(running.items()):
+            pid, _ = os.waitpid(child, os.WNOHANG)
             if pid:
-                break
-            if time.monotonic() - child_started > budget:
+                del running[child]
+            elif time.monotonic() - child_started > budget:
                 os.kill(child, signal.SIGKILL)
                 os.waitpid(child, 0)
+                del running[child]
                 print(f"{job.commit}: killed after {budget:.0f} s", file=sys.stderr, flush=True)
-                break
-            time.sleep(0.02)
+        time.sleep(0.02)
+
+
+def _child_main(job: Job, index) -> None:
+    """Runs in a forked child; never returns."""
+    code = 0
+    try:
+        try:
+            # The kernel should pick this child, not the selector, if memory runs out.
+            with open("/proc/self/oom_score_adj", "w") as handle:
+                handle.write("1000")
+        except OSError as error:
+            print(f"{job.commit}: oom_score_adj not set: {error!r}", file=sys.stderr, flush=True)
+        result = _run_job(job, index)
+        target = RESULTS / f"{job.commit}.json"
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(result), "utf-8")
+        os.replace(temporary, target)
+    except BaseException as error:  # the parent reads a missing result as no answer
+        print(f"{job.commit}: child failed {error!r}", file=sys.stderr, flush=True)
+        code = 1
+    finally:
+        os._exit(code)
 
 
 def verify(jobs: list[Job], deadline: float) -> dict[str, dict]:
