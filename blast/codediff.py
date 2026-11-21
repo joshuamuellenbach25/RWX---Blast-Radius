@@ -381,12 +381,13 @@ def _operations(nodes: list) -> Counter:
             sub = pending.pop()
             if isinstance(sub, ast.Lambda):
                 continue
-            # Lookups count by what they look up: TokenType.BEGIN made
-            # TokenType.BEIGN keeps the number of lookups and raises.
+            # Lookups count by their whole expression: TokenType.BEGIN made
+            # TokenType.BEIGN, or str.BEGIN, keeps the number of lookups and
+            # raises.
             if isinstance(sub, (ast.BinOp, ast.UnaryOp)):
                 found[f"{type(sub).__name__}.{type(sub.op).__name__}"] += 1
             elif isinstance(sub, ast.Attribute):
-                found[f"Attribute.{sub.attr}"] += 1
+                found[f"Attribute.{ast.unparse(sub)}"] += 1
             elif isinstance(sub, ast.Subscript):
                 key = ast.dump(sub.slice) if isinstance(sub.slice, ast.Constant) else "expression"
                 found[f"Subscript.{key}"] += 1

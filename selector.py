@@ -300,7 +300,11 @@ def main() -> None:
             # Strict decoding: a byte that is not UTF-8 makes the file fail to
             # import on disk even inside a comment, so such a commit runs every test.
             text = patch_path.read_bytes().decode("utf-8")
-            with _time_limit(analysis_end - time.monotonic()):
+            # One huge patch may use at most four times its fair share of
+            # the analysis time left, so the commits after it keep theirs.
+            left = analysis_end - time.monotonic()
+            share = left / max(1, len(commits) - commits.index(commit))
+            with _time_limit(min(left, max(2.0, 4 * share))):
                 analysis = analyze(text, SOURCE_ROOT, coverage)
             notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
             plans[commit] = plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit)
