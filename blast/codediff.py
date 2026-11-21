@@ -102,13 +102,20 @@ def _instruction_keys(code: CodeType) -> tuple:
             keys.append((instruction.opname, "<metadata>"))
             continue
         argval = instruction.argval
+        # The raw operand is kept except where it indexes the constants
+        # (keyed by value here) or encodes a jump (compared as an offset): an
+        # operand also carries flags (super's two-argument form, a method
+        # load, COMPARE_OP's bool conversion), and the name, local and cell
+        # indexes it holds follow from the tables the fingerprint compares.
+        keep_arg = instruction.opcode not in dis.hasconst
         if isinstance(argval, CodeType):
             argval = ("<code>", argval.co_qualname)
         elif instruction.opcode in dis.hasjump or instruction.opcode in dis.hasexc:
             argval = ("<offset>", argval)
+            keep_arg = False
         else:
             argval = _const_key(argval)
-        keys.append((instruction.opname, instruction.arg if argval is None else None, argval))
+        keys.append((instruction.opname, instruction.arg if argval is None or keep_arg else None, argval))
     return tuple(keys)
 
 

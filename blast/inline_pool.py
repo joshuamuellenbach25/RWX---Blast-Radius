@@ -41,6 +41,7 @@ class InlineProcessPool:
         self._initializer = initializer
         self._initargs = initargs
         self._initialized = False
+        self._shut_down = False
 
     def _initialize(self) -> None:
         if not self._initialized:
@@ -49,6 +50,8 @@ class InlineProcessPool:
                 self._initializer(*_round_trip(self._initargs))
 
     def submit(self, fn, /, *args, **kwargs) -> Future:
+        if self._shut_down:  # the real pool refuses work once shut down
+            raise RuntimeError("cannot schedule new futures after shutdown")
         future: Future = Future()
         try:
             self._initialize()
@@ -63,11 +66,13 @@ class InlineProcessPool:
         return future
 
     def map(self, fn, *iterables, timeout=None, chunksize=1):
+        if chunksize < 1:  # the real pool's check
+            raise ValueError("chunksize must be >= 1.")
         futures = [self.submit(fn, *args) for args in zip(*iterables)]
         return (future.result() for future in futures)
 
     def shutdown(self, wait=True, *, cancel_futures=False) -> None:
-        return None
+        self._shut_down = True
 
     def __enter__(self):
         return self
