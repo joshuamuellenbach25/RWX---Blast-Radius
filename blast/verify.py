@@ -10,6 +10,7 @@ result, and the selector then keeps every candidate for it.
 
 from __future__ import annotations
 
+import ast
 import gc
 import importlib
 import json
@@ -66,7 +67,9 @@ def _bodies_run(bodies: list) -> int:
                 parent, _, attribute = name.rpartition(".")
                 if parent in sys.modules:
                     setattr(sys.modules[parent], attribute, module)
-                exec(compile(text, filename, "exec"), module.__dict__)
+                # dont_inherit: this file's "from __future__ import
+                # annotations" must not postpone the body's annotations.
+                exec(compile(text, filename, "exec", dont_inherit=True), module.__dict__)
             code = 0
         except BaseException:  # SystemExit too: the import would fail
             pass
@@ -76,15 +79,33 @@ def _bodies_run(bodies: list) -> int:
     return os.waitstatus_to_exitcode(status)
 
 
+def _imported_modules(text: str) -> set[str]:
+    """The modules a text imports: X for import X, and X and X.name for
+    from X import name (from sqlglot import tokens imports sqlglot.tokens)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found |= {alias.name for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            found.add(node.module)
+            found |= {f"{node.module}.{alias.name}" for alias in node.names}
+    return found
+
+
 def _dependency_order(sources: list) -> list:
-    """The changed modules, a module whose new text names another changed
-    module after that one (in a cycle, the first left)."""
+    """The changed modules, a module that imports another changed module
+    after that one (in a cycle, the first left)."""
     names = {name for name, _, _ in sources}
+    imports = {name: _imported_modules(text) & names for name, _, text in sources}
     done: set[str] = set()
     ordered, pending = [], list(sources)
     while pending:
         pick = next(
-            (item for item in pending if all(other in done or other == item[0] or other not in item[2] for other in names)),
+            (item for item in pending if imports[item[0]] - {item[0]} <= done),
             pending[0],
         )
         ordered.append(pick)

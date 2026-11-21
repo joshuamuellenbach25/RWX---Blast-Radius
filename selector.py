@@ -355,12 +355,18 @@ def main() -> None:
     log(f"results: {sum(bool(r.get('ok')) for r in results.values())} ran, {passed} with no failure, {complete} complete")
 
     lines = []
+    # A commit whose import check gave no answer (no time left, a crash)
+    # has a changed module body nothing ran: unknown, so every test.
+    checked = {job.commit for job in jobs if job.sources}
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
         if result and result.get("import_failed"):
             chosen = set(all_numbers)
             how = f"patched {result['import_failed']} fails to import"
+        elif commit in checked and not result:
+            chosen = set(all_numbers)
+            how = "import check gave no answer"
         elif cheap and result and result.get("ok"):
             failed = set(result["failed"]) & cheap
             complete = bool(result.get("summary", {}).get("complete"))
