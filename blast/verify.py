@@ -32,6 +32,7 @@ class Job:
     pairs: list = field(default_factory=list)  # (old code, new code)
     required: list = field(default_factory=list)  # old codes that must have live functions
     modules: set[str] = field(default_factory=set)  # modules to import before forking
+    value: float = 0.0  # expected saving net of CPU, in ms: the selector runs the largest first
 
 
 def _limit(test: dict) -> float:

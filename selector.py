@@ -170,7 +170,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     kept, cheap, slow = best
     run = run_order(cheap, by_number)
     modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
-    jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules))
+    jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules, value=best_margin))
     return kept, cheap, slow
 
 DATA = Path(os.environ.get("BLAST_DATA", "/data"))
@@ -308,6 +308,9 @@ def main() -> None:
             log(f"{commit}: analysis failed, running every test: {error!r}")
 
     deadline = started + time_budget(len(commits))
+    # On a slow or starved host not every job finishes by the deadline: the
+    # ones worth the most go first.
+    jobs.sort(key=lambda job: -job.value)
     results = {}
     stage = 0  # 0 no jobs, 1 verify raised, 2 no results came back, 3 results
     if jobs:
