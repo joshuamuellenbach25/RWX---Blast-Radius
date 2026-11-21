@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import importlib.machinery
+import importlib.util
 import inspect
 import json
 import re
@@ -75,11 +76,21 @@ def _same_syntax_tree(old_text: str, new_text: str) -> bool:
         return False
 
 
+def _no_regular_module(name: str) -> bool:
+    """No installed or standard module has this name: only then does a
+    folder of that name become the module (a namespace package)."""
+    try:
+        return importlib.util.find_spec(name) is None
+    except (ImportError, ValueError):
+        return True
+
+
 def _shadowed_module(paths, source_root: Path) -> str | None:
     """The import name that a file at the checkout's root takes over, if any:
     X for X.py, X/__init__.py or an extension module X.*.so or X.pyd when X
     is a stdlib module or one the code imports; for any other file in a
-    folder X there (a namespace package) when the code imports X."""
+    folder X there (a namespace package) when the code imports X and no
+    installed or standard module X exists (duckdb/notes.md is no duckdb)."""
     for path in paths:
         head, slash, _ = path.partition("/")
         if slash:
@@ -91,7 +102,9 @@ def _shadowed_module(paths, source_root: Path) -> str | None:
             name = stem if regular else ""
         if not name.isidentifier() or name in ("sqlglot", "tests", "sqlglotc"):
             continue
-        if name in _imported_names(source_root) or (regular and name in sys.stdlib_module_names):
+        if regular and (name in _imported_names(source_root) or name in sys.stdlib_module_names):
+            return name
+        if not regular and name in _imported_names(source_root) and _no_regular_module(name):
             return name
     return None
 
