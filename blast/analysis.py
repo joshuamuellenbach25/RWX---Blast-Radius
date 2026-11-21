@@ -190,14 +190,20 @@ def analyze(patch_text: str, source_root: Path, coverage: CoverageMap) -> Commit
     return CommitAnalysis(verdicts)
 
 
+_pristine_docstrings: dict[str, dict[tuple, str]] = {}
+
+
 def _docstrings(text: str, pristine: bool) -> dict[tuple, str]:
     """The docstring of the module and of every class and function that has
     one, keyed by nesting path plus the definition's place among same-named
     definitions under one owner (a property's getter and setter share a
     name). A definition with no docstring adds nothing, so an added
     undocumented helper changes nothing here. Empty when the text does not
-    parse. A patched text is parsed outside the cache of pristine trees, so
-    no patched tree is kept."""
+    parse. A pristine text's result is kept for the next commit; a patched
+    text is parsed outside the cache of pristine trees, so no patched tree
+    is kept."""
+    if pristine and text in _pristine_docstrings:
+        return _pristine_docstrings[text]
     try:
         tree = parse_cached(text) if pristine else ast.parse(text)
     except SyntaxError:
@@ -221,6 +227,8 @@ def _docstrings(text: str, pristine: bool) -> dict[tuple, str]:
                 pending.append((path, child))
             elif isinstance(child, ast.stmt):
                 pending.append((owner, child))
+    if pristine:
+        _pristine_docstrings[text] = found
     return found
 
 
