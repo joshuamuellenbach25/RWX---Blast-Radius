@@ -383,12 +383,15 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
 
 
 def _insertion_points(patch) -> set[int]:
-    """Old line numbers before which the patch only adds lines (a run of
-    added lines with no removed line in it)."""
+    """Old line numbers where the patch adds code that can run on paths the
+    old lines there never ran on: a run of only added lines, or a run whose
+    added lines sit left of its removed ones (a statement moved out of its
+    block now runs whenever the enclosing code does)."""
     points: set[int] = set()
     for hunk in patch.hunks:
         old_line = hunk.old_start
         start, removed, added = old_line, False, False
+        removed_indent = added_indent = None
         for line in [*hunk.lines, " "]:  # the sentinel closes the last run
             tag = line[:1]
             if tag == "\\":
@@ -396,15 +399,23 @@ def _insertion_points(patch) -> set[int]:
             if tag in "-+":
                 if not (removed or added):
                     start = old_line
+                text = line[1:]
+                indent = len(text) - len(text.lstrip(" \t")) if text.strip() else None
                 if tag == "-":
                     removed = True
                     old_line += 1
+                    if indent is not None:
+                        removed_indent = indent if removed_indent is None else min(removed_indent, indent)
                 else:
                     added = True
+                    if indent is not None:
+                        added_indent = indent if added_indent is None else min(added_indent, indent)
                 continue
-            if added and not removed:
+            dedented = removed_indent is not None and added_indent is not None and added_indent < removed_indent
+            if added and (not removed or dedented):
                 points.add(start)
             removed = added = False
+            removed_indent = added_indent = None
             old_line += 1
     return points
 

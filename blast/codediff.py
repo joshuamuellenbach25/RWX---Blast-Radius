@@ -10,6 +10,7 @@ live process) or at module or class level (the module has to be re-imported).
 from __future__ import annotations
 
 import ast
+import builtins
 import dis
 import inspect
 import re
@@ -321,23 +322,75 @@ def _calls_code(node: ast.stmt) -> bool:
     return any(isinstance(sub, ast.Call) for part in parts for sub in ast.walk(part))
 
 
+ALWAYS_BOUND = set(dir(builtins)) | {
+    "__file__", "__path__", "__spec__", "__loader__", "__package__", "__builtins__", "__module__", "__qualname__",
+}
+
+
+def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
+    """A name this simple statement reads when it runs at import that nothing
+    has bound yet, so running it raises NameError. Lambda bodies run later,
+    and compound statements are not read (None: no claim)."""
+    if "*" in bound:  # a star import binds names no statement shows
+        return None
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+    elif isinstance(node, ast.ClassDef):
+        parts = [*node.bases, *node.keywords, *node.decorator_list]
+    elif isinstance(node, ast.AnnAssign):
+        parts = [node.value] if node.value is not None else []
+    elif isinstance(node, (ast.Assign, ast.AugAssign, ast.Expr)):
+        parts = [node.value]
+    else:
+        return None
+    for part in parts:
+        pending, loads, local = [part], [], set()
+        while pending:
+            sub = pending.pop()
+            if isinstance(sub, ast.Lambda):
+                continue
+            if isinstance(sub, ast.comprehension):
+                local.update(n.id for n in ast.walk(sub.target) if isinstance(n, ast.Name))
+            elif isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name):
+                local.add(sub.target.id)
+            elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                loads.append(sub.id)
+            pending.extend(ast.iter_child_nodes(sub))
+        for name in loads:
+            if name not in bound and name not in local and name not in ALWAYS_BOUND:
+                return name
+    return None
+
+
 def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
     Function bodies are left out: bytecode comparison covers them."""
     import difflib
 
-    def compare(old_body: list, new_body: list, owner: tuple[str, ...]) -> list[Binding]:
+    def compare(old_body: list, new_body: list, owner: tuple[str, ...], module_bound: set[str]) -> list[Binding]:
         old_keys = [_signature_key(node) for node in old_body]
         new_keys = [_signature_key(node) for node in new_body]
         matcher = difflib.SequenceMatcher(a=old_keys, b=new_keys, autojunk=False)
         found: list[Binding] = []
+        # Names this body has bound so far, in source order: a class body
+        # also sees the module's names bound before the class statement.
+        bound: set[str] = set()
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             olds, news = old_body[i1:i2], new_body[j1:j2]
             if tag == "equal":
                 for old_node, new_node in zip(olds, news):
                     if isinstance(old_node, ast.ClassDef):
-                        found.extend(compare(old_node.body, new_node.body, owner + (old_node.name,)))
+                        seen = module_bound if owner else bound
+                        found.extend(compare(old_node.body, new_node.body, owner + (old_node.name,), set(seen)))
+                    bound.update(name for name, _ in _bound_names(new_node))
                 continue
+            for node in news:
+                # A changed statement that reads an unbound name raises at
+                # import, like a call that raises: the module fails to load.
+                missing = _unbound_load(node, bound | module_bound)
+                if missing:
+                    found.append(Binding(owner, f"<unbound {missing}>", "class-call" if owner else "call"))
+                bound.update(name for name, _ in _bound_names(node))
             old_names = {}
             for node in olds:
                 for name, kind in _bound_names(node):
@@ -360,7 +413,7 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
         return found
 
-    return compare(ast.parse(old_text).body, ast.parse(new_text).body, ())
+    return compare(ast.parse(old_text).body, ast.parse(new_text).body, (), set())
 
 
 def statement_spans(source: str) -> list[tuple[int, int]]:
