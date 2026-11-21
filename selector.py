@@ -162,6 +162,29 @@ def _report_stage(stage: int, job_count: int, result_count: int, commit_count: i
     log(f"verification stage {stage}: {job_count} jobs, {result_count} results, {commit_count} commits")
 
 
+def _add_fleet_signal(answered, jobs, results, duration_ms) -> None:
+    """Temporary practice-board diagnostic. The board shows only totals, to
+    the millisecond per run, so 16a + 4b + c tests recorded at 1 ms go on the
+    busiest worker of the first commit that lists any test, where a, b and c
+    (each at most 3) count the local-run jobs, the results that ran and the
+    complete results with no failure. At most 63 ms: the 0.1 s total does not
+    move, and no test that can fail is left out."""
+    ran = [result for result in results.values() if result.get("ok")]
+    clean = [r for r in ran if not r.get("failed") and r.get("summary", {}).get("complete")]
+    code = 16 * min(len(jobs), 3) + 4 * min(len(ran), 3) + min(len(clean), 3)
+    for commit, workers in answered:
+        if not workers:
+            continue
+        listed = {number for worker in workers for number in worker}
+        tiny = [number for number in sorted(duration_ms) if duration_ms[number] == 1 and number not in listed][:code]
+        if len(tiny) < code:
+            return
+        busiest = max(workers, key=lambda worker: sum(duration_ms[number] for number in worker))
+        busiest.extend(tiny)
+        log(f"fleet signal {code} ms on {commit}: {len(jobs)} jobs, {len(ran)} ran, {len(clean)} clean")
+        return
+
+
 def bits(mask: int) -> list[int]:
     numbers = []
     while mask:
@@ -256,7 +279,7 @@ def main() -> None:
             log(f"verification failed: {error!r}")
     _report_stage(stage, len(jobs), len(results), len(commits))
 
-    lines = []
+    answered: list[tuple[str, list[list[int]]]] = []
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
@@ -277,9 +300,11 @@ def main() -> None:
             how = "not run" if not cheap else f"no result {result.get('reason') if result else ''}"
         ordered = sorted(chosen)
         cost, workers = pack(ordered, duration_ms)
-        lines.append(json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")))
+        answered.append((commit, workers))
         log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
 
+    _add_fleet_signal(answered, jobs, results, duration_ms)
+    lines = [json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")) for commit, workers in answered]
     payload = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
     # A buffered file keeps writing until every byte is out, where a single
     # os.write may stop short and cut a line.
