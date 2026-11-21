@@ -20,6 +20,7 @@ INSPECTING_TEST_FILE = "tests/test_typing.py"
 # Files pytest itself reads before any test runs: a change can alter every test.
 RUNNER_CONFIG = {
     "pyproject.toml", "setup.cfg", "setup.py", "tox.ini", "pytest.ini",
+    ".pytest.ini", "pytest.toml", ".pytest.toml",  # pytest 9 reads these too
     "tests/__init__.py", "tests/helpers.py",
 }
 
