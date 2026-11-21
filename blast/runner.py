@@ -36,17 +36,19 @@ def function_index() -> dict[tuple[str, str, int], list[types.FunctionType]]:
     return index
 
 
-def swap_functions(pairs, index) -> int:
+def swap_functions(pairs, index) -> list[int]:
     """pairs: (old code, new code). Point every live function that runs the
-    old code at the new code. Returns how many function objects changed."""
-    swapped = 0
+    old code at the new code. Returns, per pair, how many functions changed."""
+    counts = []
     for old, new in pairs:
         key = (old.co_filename, old.co_qualname, old.co_firstlineno)
+        swapped = 0
         for function in index.get(key, []):
             if function.__code__.co_code == old.co_code:
                 function.__code__ = new
                 swapped += 1
-    return swapped
+        counts.append(swapped)
+    return counts
 
 
 # ---------------------------------------------------------- patched sources
@@ -142,10 +144,13 @@ def run_tests(tests: list[dict], limits_by_number: dict[int, float]) -> tuple[se
     that failed, errored, timed out or could not be loaded, and a summary."""
     import importlib
 
+    from blast import inline_pool
+
     by_unittest_id = {unittest_id(test): test for test in tests}
     limits = {unittest_id(test): limits_by_number[test["number"]] for test in tests}
     failed: set[int] = set()
     suite = unittest.TestSuite()
+    modules = []
     ordered = sorted(tests, key=lambda test: (test["file"], test["id"].split("::")[1], test["seconds"]))
     for test in ordered:
         module_name = test["file"][: -len(".py")].replace("/", ".")
@@ -153,8 +158,10 @@ def run_tests(tests: list[dict], limits_by_number: dict[int, float]) -> tuple[se
         try:
             module = importlib.import_module(module_name)
             suite.addTest(getattr(module, class_name)(method))
+            modules.append(module)
         except Exception:  # a test file that cannot be imported fails all its tests
             failed.add(test["number"])
+    inline_pool.install(modules)
     previous = signal.signal(signal.SIGALRM, _on_alarm)
     recorder = _Recorder(limits)
     try:

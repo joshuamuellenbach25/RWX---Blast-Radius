@@ -207,7 +207,8 @@ def analyze_python(
         if runs_at_import:
             return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
         kind = "test_function" if path.startswith("tests/") else "function"
-        return FileVerdict(path, kind, function_tests, function_note, function_changes, new_text)
+        swaps = function_changes + list(diff.ancestors)
+        return FileVerdict(path, kind, function_tests, function_note, swaps, new_text)
 
     if runs_at_import or diff.unmatched:
         return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)

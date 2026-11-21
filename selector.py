@@ -22,6 +22,62 @@ sys.path.insert(0, str(APP))
 
 from blast.analysis import CoverageMap, analyze  # noqa: E402
 from blast.packing import pack  # noqa: E402
+from blast.verify import Job, verify  # noqa: E402
+
+# Tests recorded at or above this many seconds are never run here: running
+# one costs about what listing it costs. They are listed only when a cheap
+# candidate fails, or when no cheap candidate exists.
+SLOW_SECONDS = 2.5
+# Tests that start their own Python process see the files on disk, not the
+# patched code, so a run here proves nothing about them.
+SUBPROCESS_TESTS = {"tests/dialects/test_dialect.py::TestDialect::test_lazy_load"}
+VERIFIED_KINDS = {"function", "test_function"}
+
+
+def time_budget(commit_count: int) -> float:
+    """Seconds of wall time the whole batch may use, 60% of the run limit:
+    3 minutes for practice-sized batches, 4.5 minutes for the final's."""
+    limit = 180.0 if commit_count <= 45 else 270.0
+    return 0.6 * limit
+
+
+def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
+    """(tests kept without running, cheap tests to run, slow tests) in the
+    runtime numbering; adds a Job when some tests can be run here."""
+    def runtime(mask: int) -> set[int]:
+        return {translate[n] for n in bits(mask) if translate[n] is not None}
+
+    kept: set[int] = set()
+    candidates: set[int] = set()
+    pairs, required, modules = [], [], set()
+    verifiable = True
+    for verdict in analysis.files:
+        tests = runtime(verdict.tests)
+        if verdict.kind in VERIFIED_KINDS:
+            candidates |= tests
+            for change in verdict.swaps:
+                pairs.append((change.old, change.new))
+                if "<locals>" not in change.old.co_qualname:
+                    required.append(change.old)
+            module = verdict.path[: -len(".py")].replace("/", ".")
+            modules.add(module[: -len(".__init__")] if module.endswith(".__init__") else module)
+        else:
+            kept |= tests
+            if verdict.kind == "module":
+                verifiable = False
+    if (kept or candidates) and unknown_tests:
+        kept |= set(unknown_tests)
+    candidates -= kept
+    if not verifiable:
+        return kept | candidates, set(), set()
+    slow = {n for n in candidates if by_number[n]["seconds"] >= SLOW_SECONDS or by_number[n]["id"] in SUBPROCESS_TESTS}
+    cheap = candidates - slow
+    if not cheap:
+        return kept | slow, set(), set()
+    run = [by_number[n] for n in sorted(cheap)]
+    modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
+    jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules))
+    return kept, cheap, slow
 
 DATA = Path(os.environ.get("BLAST_DATA", "/data"))
 SOURCE_ROOT = Path(os.environ.get("BLAST_SOURCE", "/sqlglot"))
@@ -68,25 +124,48 @@ def main() -> None:
         if unknown_tests:
             log(f"{len(unknown_tests)} tests are not in the map; they run with every changed commit")
 
+    by_number = {test["number"]: test for test in tests}
+    # commit -> (tests kept without running, cheap tests to run, slow tests)
+    plans: dict[str, tuple[set[int], set[int], set[int]]] = {}
+    jobs: list[Job] = []
+    notes: dict[str, str] = {}
+    for commit in commits:
+        kept: set[int] = set(all_numbers)
+        notes[commit] = "fallback"
+        plans[commit] = (kept, set(), set())
+        if coverage is None:
+            continue
+        try:
+            text = (DATA / "commits" / f"{commit}.patch").read_text("utf-8", errors="replace")
+            analysis = analyze(text, SOURCE_ROOT, coverage)
+            notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
+            plans[commit] = plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit)
+        except Exception as error:  # an unreadable commit runs every test
+            log(f"{commit}: analysis failed, running every test: {error!r}")
+
+    deadline = started + time_budget(len(commits))
+    results = {}
+    if jobs:
+        try:
+            results = verify(jobs, deadline)
+        except Exception as error:  # unverified commits keep every candidate
+            log(f"verification failed: {error!r}")
+
     lines = []
     for commit in commits:
-        chosen = all_numbers
-        note = "fallback"
-        if coverage is not None:
-            try:
-                text = (DATA / "commits" / f"{commit}.patch").read_text("utf-8", errors="replace")
-                analysis = analyze(text, SOURCE_ROOT, coverage)
-                mask = analysis.tests
-                chosen = sorted({translate[n] for n in bits(mask) if translate[n] is not None})
-                if mask and unknown_tests:
-                    chosen = sorted(set(chosen) | set(unknown_tests))
-                note = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
-            except Exception as error:  # an unreadable commit runs every test
-                log(f"{commit}: analysis failed, running every test: {error!r}")
-                chosen = all_numbers
-        cost, workers = pack(chosen, duration_ms)
+        kept, cheap, slow = plans[commit]
+        result = results.get(commit)
+        if cheap and result and result.get("ok"):
+            failed = set(result["failed"]) & cheap
+            chosen = kept | failed | (slow if failed else set())
+            how = f"ran {len(cheap)}, {len(failed)} failed"
+        else:
+            chosen = kept | cheap | slow
+            how = "not run" if not cheap else f"no result {result.get('reason') if result else ''}"
+        ordered = sorted(chosen)
+        cost, workers = pack(ordered, duration_ms)
         lines.append(json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")))
-        log(f"{commit}: {len(chosen)} tests, {cost / 1000:.2f} s [{note}]")
+        log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
 
     payload = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
     os.write(answer_fd, payload)
