@@ -412,6 +412,10 @@ def _operations(nodes: list) -> Counter:
             # raises.
             if isinstance(sub, (ast.BinOp, ast.UnaryOp)):
                 found[f"{type(sub).__name__}.{type(sub.op).__name__}"] += 1
+            elif isinstance(sub, (ast.List, ast.Set, ast.Dict, ast.Tuple)):
+                # A new container can be unhashable where a key or set member
+                # was ([TokenType.BEGIN] in a set raises TypeError).
+                found[type(sub).__name__] += 1
             elif isinstance(sub, ast.Attribute):
                 found[f"Attribute.{ast.unparse(sub)}"] += 1
             elif isinstance(sub, ast.Subscript):
@@ -432,6 +436,10 @@ def _value_kinds(nodes: list) -> dict[str, str]:
             targets, value = [node.target], node.value
         else:
             continue
+        # A signed number (-1) is a constant like 0, not a new kind of value.
+        if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.USub, ast.UAdd)) \
+                and isinstance(value.operand, ast.Constant) and isinstance(value.operand.value, (int, float, complex)):
+            value = value.operand
         kind = type(value).__name__
         if isinstance(value, ast.Constant):
             kind += f".{type(value.value).__name__}"
@@ -476,6 +484,11 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             if added_operations:
                 label = ", ".join(sorted(added_operations))
                 found.append(Binding(owner, f"<new {label}>", "class-call" if owner else "import-risk"))
+            # __all__ decides what a star import copies: changing it can leave
+            # a name missing in every module that star-imports this one.
+            changed_names = {name for node in (*olds, *news) for name, _ in _bound_names(node)}
+            if "__all__" in changed_names:
+                found.append(Binding(owner, "<__all__>", "class-call" if owner else "import-risk"))
             # A value whose kind changes (a dict made None) can break the code
             # that reads it at import, such as a metaclass building tables.
             old_kinds, new_kinds = _value_kinds(olds), _value_kinds(news)
