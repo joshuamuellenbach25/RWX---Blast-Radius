@@ -190,23 +190,35 @@ def analyze(patch_text: str, source_root: Path, coverage: CoverageMap) -> Commit
     return CommitAnalysis(verdicts)
 
 
-def _docstrings(text: str) -> dict[tuple[str, ...], str | None]:
-    """The docstring of the module and of every class and function, by their
-    nesting path (defs inside if and try blocks included); empty when the
-    text does not parse."""
+def _docstrings(text: str, pristine: bool) -> dict[tuple, str]:
+    """The docstring of the module and of every class and function that has
+    one, keyed by nesting path plus the definition's place among same-named
+    definitions under one owner (a property's getter and setter share a
+    name). A definition with no docstring adds nothing, so an added
+    undocumented helper changes nothing here. Empty when the text does not
+    parse. A patched text is parsed outside the cache of pristine trees, so
+    no patched tree is kept."""
     try:
-        tree = parse_cached(text)
+        tree = parse_cached(text) if pristine else ast.parse(text)
     except SyntaxError:
         return {}
-    found: dict[tuple[str, ...], str | None] = {(): ast.get_docstring(tree, clean=False)}
-    pending: list[tuple[tuple[str, ...], ast.AST]] = [((), tree)]
+    found: dict[tuple, str] = {}
+    module_doc = ast.get_docstring(tree, clean=False)
+    if module_doc is not None:
+        found[()] = module_doc
+    places: dict[tuple, int] = {}
+    pending: list[tuple[tuple, ast.AST]] = [((), tree)]
     while pending:
         owner, node = pending.pop()
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                key = (*owner, child.name)
-                found[key] = ast.get_docstring(child, clean=False)
-                pending.append((key, child))
+                path = (*owner, child.name)
+                place = places.get(path, 0)
+                places[path] = place + 1
+                doc = ast.get_docstring(child, clean=False)
+                if doc is not None:
+                    found[(*path, place)] = doc
+                pending.append((path, child))
             elif isinstance(child, ast.stmt):
                 pending.append((owner, child))
     return found
@@ -364,7 +376,7 @@ def analyze_python(
     # does not carry and no swap of function code applies: a package file
     # whose docstrings change is checked in a fresh run (a module verdict),
     # where a test that reads one sees the new text.
-    docs_changed = path.startswith("sqlglot/") and _docstrings(old_text) != _docstrings(new_text)
+    docs_changed = path.startswith("sqlglot/") and _docstrings(old_text, True) != _docstrings(new_text, False)
     if diff.same_behavior:
         if docs_changed:
             return FileVerdict(path, "module", 0, "docstring changed", new_text=new_text)
