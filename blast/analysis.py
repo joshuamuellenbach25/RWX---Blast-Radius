@@ -313,11 +313,12 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         own = {line for _, _, line in change.old.co_lines() if line is not None} - nested
         if own:
             own_lines.update(range(min(own), max(own) + 1))
-        # A one-line lambda shares its line with the statement that built it
-        # at import, and the map leaves import-time lines out of every test,
-        # so no test is recorded for it. List the tests that create its class,
-        # or every test when it belongs to no class.
-        if own and not coverage.tests_covering(path, own) and coverage.executed_at_import(path, own):
+        # A lambda that shares its line with code run at import is invisible
+        # to the map: import-time lines are left out of every test, and a
+        # factory such as rename_func records only the few tests that reached
+        # its line later. List the tests that create its class, or every test
+        # when it belongs to no class.
+        if own and coverage.executed_at_import(path, own) and "<lambda>" in change.old.co_qualname:
             owner = change.old.co_qualname.split(".<", 1)[0]
             creators = 0
             if owner and "<" not in owner and owner != change.old.co_qualname:
