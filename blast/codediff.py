@@ -592,6 +592,11 @@ def _operations(nodes: list) -> Counter:
                 # The receiver counts too: t.Union[...] made int[...] raises.
                 found[f"Subscript.{ast.unparse(sub)}"] += 1
             pending.extend(ast.iter_child_nodes(sub))
+    # A lookup that already ran here gives the same answer when repeated:
+    # one more "SELECTX": TokenType.SELECT entry looks up nothing new.
+    for key in found:
+        if key.startswith(("Attribute.", "Subscript.")):
+            found[key] = 1
     return found
 
 
