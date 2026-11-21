@@ -790,6 +790,13 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             # list of pairs) breaks code that unpacks it at import, such as a
             # tokenizer building its tables, and so does emptying it (QUOTES
             # made []). More elements of the kinds already there do not count.
+            # A value the module or class no longer assigns (Tokenizer.QUOTES
+            # deleted) fails its import-time readers, such as a metaclass
+            # building tables, and import-time lines are not in the map.
+            still_bound = {name for node in news for name, _ in _bound_names(node)}
+            removed = sorted(old_kinds.keys() - still_bound)
+            if removed:
+                found.append(Binding(owner, f"<removed {', '.join(removed)}>", "class-call" if owner else "import-risk"))
             old_shapes, new_shapes = _element_shapes(olds), _element_shapes(news)
             regrown = sorted(
                 name
