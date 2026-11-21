@@ -10,9 +10,11 @@ go to stderr.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -162,6 +164,33 @@ def _report_stage(stage: int, job_count: int, result_count: int, commit_count: i
     log(f"verification stage {stage}: {job_count} jobs, {result_count} results, {commit_count} commits")
 
 
+class AnalysisTimeout(BaseException):
+    """Raised by the timer when one commit's analysis runs past the analysis
+    deadline. A BaseException, so no `except Exception` inside the analysis
+    can swallow it."""
+
+
+@contextlib.contextmanager
+def _time_limit(seconds: float):
+    """Stop the block after `seconds`: one huge patch that starts just before
+    the analysis deadline must not carry the run past its limit. Without
+    SIGALRM (not on Linux) the block runs unbounded."""
+    if not hasattr(signal, "setitimer"):
+        yield
+        return
+
+    def expire(signum, frame):
+        raise AnalysisTimeout(f"analysis ran past its {seconds:.1f} s")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, max(seconds, 0.001))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def bits(mask: int) -> list[int]:
     numbers = []
     while mask:
@@ -238,10 +267,11 @@ def main() -> None:
             # Strict decoding: a byte that is not UTF-8 makes the file fail to
             # import on disk even inside a comment, so such a commit runs every test.
             text = (DATA / "commits" / f"{commit}.patch").read_bytes().decode("utf-8")
-            analysis = analyze(text, SOURCE_ROOT, coverage)
+            with _time_limit(analysis_end - time.monotonic()):
+                analysis = analyze(text, SOURCE_ROOT, coverage)
             notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
             plans[commit] = plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit)
-        except Exception as error:  # an unreadable commit runs every test
+        except (Exception, AnalysisTimeout) as error:  # an unreadable commit runs every test
             log(f"{commit}: analysis failed, running every test: {error!r}")
 
     deadline = started + time_budget(len(commits))
