@@ -357,12 +357,90 @@ def _unbound_body(body: list, bound: set[str]) -> str | None:
         missing = _unbound_load(child, seen)
         if missing:
             return missing
-        seen |= _binds(child)
+        sure = _sure_binds(child)
+        if sure is None:  # the rest of the branch never runs
+            return None
+        seen |= sure
     return None
 
 
 def _target_names(target: ast.AST | None) -> set[str]:
     return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} if target is not None else set()
+
+
+def _never_runs(test: ast.expr) -> bool:
+    """An if test that is false when the code runs: a false constant or
+    TYPE_CHECKING, which only type checkers set."""
+    if isinstance(test, ast.Constant):
+        return not test.value
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return isinstance(test, ast.Name) and test.id == "TYPE_CHECKING"
+
+
+def _always_true(test: ast.expr) -> bool:
+    return isinstance(test, ast.Constant) and bool(test.value)
+
+
+def _branches(node: ast.stmt) -> list[list]:
+    """The statement lists inside a compound statement that can run."""
+    if isinstance(node, ast.If):
+        live = [] if _never_runs(node.test) else [node.body]
+        return live if _always_true(node.test) else [*live, node.orelse]
+    if isinstance(node, ast.Try):
+        return [node.body, *(handler.body for handler in node.handlers), node.orelse, node.finalbody]
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        return [node.body, node.orelse]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [node.body]
+    return []
+
+
+def _headers(node: ast.stmt) -> list:
+    """The expressions a compound statement evaluates itself."""
+    if isinstance(node, (ast.If, ast.While)):
+        return [node.test]
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.iter]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [item.context_expr for item in node.items]
+    if isinstance(node, ast.Try):
+        return [handler.type for handler in node.handlers if handler.type is not None]
+    return []
+
+
+def _sure_binds(node: ast.stmt) -> set[str] | None:
+    """Names a statement is sure to have bound when it completes, or None
+    when it never completes (it raises). A name bound in one branch of an if
+    only is not sure, nor one bound in a loop body that may run no times."""
+    if isinstance(node, ast.Raise):
+        return None
+    if isinstance(node, ast.If):
+        sure = [names for names in (_always_binds(branch) for branch in _branches(node)) if names is not None]
+        return set.intersection(*sure) if sure else None
+    if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+        return set()
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        inner = _always_binds(node.body)
+        return None if inner is None else inner.union(*(_target_names(item.optional_vars) for item in node.items))
+    if isinstance(node, ast.Try):
+        final = _always_binds(node.finalbody)
+        paths = [_always_binds([*node.body, *node.orelse]), *(_always_binds(handler.body) for handler in node.handlers)]
+        sure = [names for names in paths if names is not None]
+        if final is None or not sure:
+            return None
+        return set.intersection(*sure) | final
+    return _binds(node)
+
+
+def _always_binds(body: list) -> set[str] | None:
+    names: set[str] = set()
+    for child in body:
+        sure = _sure_binds(child)
+        if sure is None:
+            return None
+        names |= sure
+    return names
 
 
 def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
@@ -373,7 +451,10 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
     if "*" in bound:  # a star import binds names no statement shows
         return None
     if isinstance(node, (ast.If, ast.While)):
-        return _unbound_in([node.test], bound) or _unbound_body(node.body, bound) or _unbound_body(node.orelse, bound)
+        # A branch that cannot run (if TYPE_CHECKING:) reads nothing.
+        return _unbound_in([node.test], bound) or next(
+            (missing for branch in _branches(node) if (missing := _unbound_body(branch, bound))), None
+        )
     if isinstance(node, (ast.For, ast.AsyncFor)):
         inner = bound | _target_names(node.target)
         return _unbound_in([node.iter], bound) or _unbound_body(node.body, inner) or _unbound_body(node.orelse, inner)
@@ -451,6 +532,13 @@ def _operations(nodes: list) -> Counter:
             parts = [*node.bases, *node.keywords, *node.decorator_list]
         elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
             parts = [node.value] if node.value is not None else []
+        elif _branches(node) or _headers(node):
+            # A compound statement runs its own expressions and the
+            # statements of every branch that can run. An if TYPE_CHECKING:
+            # header reads a name the typing module always has.
+            parts = [] if isinstance(node, ast.If) and _never_runs(node.test) else _headers(node)
+            for branch in _branches(node):
+                found += _operations(branch)
         else:
             continue
         pending = list(parts)
@@ -574,7 +662,7 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                     if isinstance(old_node, ast.ClassDef):
                         seen = module_bound if owner else bound
                         found.extend(compare(old_node.body, new_node.body, owner + (old_node.name,), set(seen)))
-                    bound.update(_binds(new_node))
+                    bound.update(_sure_binds(new_node) or set())
                 continue
             for node in news:
                 # A changed statement that reads an unbound name raises at
@@ -582,7 +670,7 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 missing = _unbound_load(node, bound | module_bound)
                 if missing:
                     found.append(Binding(owner, f"<unbound {missing}>", "class-call" if owner else "import-risk"))
-                bound.update(_binds(node))
+                bound.update(_sure_binds(node) or set())
             # An operation the old statements did not run (1 / 0, a new
             # subscript or attribute) can raise at import the same way.
             added_operations = _operations(news) - _operations(olds)
