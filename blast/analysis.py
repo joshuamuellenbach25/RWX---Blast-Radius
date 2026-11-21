@@ -64,6 +64,17 @@ def _imported_names(source_root: Path) -> set[str]:
     return names
 
 
+def _same_syntax_tree(old_text: str, new_text: str) -> bool:
+    """Equal syntax trees and equal first two lines (where a coding
+    declaration would change how the file decodes)."""
+    if old_text.splitlines()[:2] != new_text.splitlines()[:2]:
+        return False
+    try:
+        return ast.dump(ast.parse(old_text)) == ast.dump(ast.parse(new_text))
+    except (SyntaxError, ValueError):
+        return False
+
+
 def _shadowed_module(paths, source_root: Path) -> str | None:
     """The import name that a file at the checkout's root takes over, if any:
     X for X.py, X/__init__.py or an extension module X.*.so or X.pyd when X
@@ -422,6 +433,11 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
         return FileVerdict(path, "unknown", everything, f"cannot apply: {error}")
 
     if path in RUNNER_CONFIG or path.rsplit("/", 1)[-1] == "conftest.py":
+        # Q2's proof that a change breaks nothing: the same syntax tree (a
+        # comment, a blank line), with the first two lines, where a coding
+        # declaration sits, unchanged.
+        if path.endswith(".py") and _same_syntax_tree(old_text, new_text):
+            return FileVerdict(path, "same", 0, "identical syntax tree", new_text=new_text)
         return FileVerdict(path, "unknown", everything, "runner configuration", new_text=new_text)
 
     if path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):

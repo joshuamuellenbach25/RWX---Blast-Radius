@@ -143,10 +143,12 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
             if verdict.kind in ("module", "moved"):
                 verifiable = False
     # A local run sees the files on disk, not the patch's data files: a test
-    # the patch edits may now read a changed file (a README, a fixture) that
-    # the run cannot apply, so such a commit keeps its edited tests listed.
+    # the patch edits, or code it changes, may now read a changed or added
+    # file (a README, a fixture, a JSON table) that the run cannot apply, so
+    # no local run can vouch for such a commit's candidates.
     if any(verdict.kind in ("fixture", "other") for verdict in analysis.files):
         kept |= edited
+        verifiable = False
     # Tests the map does not know can break on any change that reaches tests.
     # Decided from the map's own verdicts, so a tests.json whose ids the map
     # never matches still lists them instead of answering nothing.
