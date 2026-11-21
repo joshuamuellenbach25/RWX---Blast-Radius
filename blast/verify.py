@@ -97,9 +97,11 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
                 _child_main(job, index)
             running[child] = (job, time.monotonic(), budget)
         for child, (job, child_started, budget) in list(running.items()):
-            pid, _ = os.waitpid(child, os.WNOHANG)
+            pid, _, usage = os.wait4(child, os.WNOHANG)
             if pid:
                 del running[child]
+                cpu = usage.ru_utime + usage.ru_stime
+                print(f"{job.commit}: child done in {time.monotonic() - child_started:.1f} s, {cpu:.2f} s CPU", file=sys.stderr, flush=True)
             elif time.monotonic() - child_started > budget:
                 os.kill(child, signal.SIGKILL)
                 os.waitpid(child, 0)
