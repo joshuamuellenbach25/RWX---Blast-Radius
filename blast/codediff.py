@@ -350,11 +350,11 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 for name, kind in _bound_names(node):
                     new_names.setdefault(name, kind)
             # Module-level code runs once at import; a changed statement there
-            # that calls code can change state no name lookup reveals.
-            # (Class bodies are left to the name rules: their factory calls,
-            # such as rename_func("X") in TRANSFORMS, only build values.)
-            if not owner and any(_calls_code(node) for node in (*olds, *news)):
-                found.append(Binding(owner, "<call>", "call"))
+            # that calls code can change state no name lookup reveals. In a
+            # class body the call can raise at import and break every test
+            # that loads the file, so those statements add the file's tests.
+            if any(_calls_code(node) for node in (*olds, *news)):
+                found.append(Binding(owner, "<call>", "class-call" if owner else "call"))
             for name in old_names.keys() | new_names.keys():
                 kind, lines = old_names.get(name, (new_names.get(name), None))
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))

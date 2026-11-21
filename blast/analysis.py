@@ -260,6 +260,18 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int
             return everything, f"unreadable statement near {'.'.join(binding.owner) or 'module'}"
         if binding.kind == "call":
             return everything, "a changed module-level statement calls code at import"
+        if binding.kind == "class-call":
+            # A class-body call that raises at import breaks every test that
+            # loads this file: the ones that create the class (a dialect
+            # module holds little runtime code of its own) and the ones that
+            # ran some of the file's code. With neither known, list everything.
+            loaders = coverage.tests_creating(f"{module}:{'.'.join(binding.owner)}")
+            loaders |= coverage.tests_touching_file(path)
+            if not loaders:
+                return everything, f"{'.'.join(binding.owner)}: class-body call, no test known to load it"
+            tests |= loaders
+            notes.append(f"{'.'.join(binding.owner)}: class-body call, all creators and file tests")
+            continue
         if binding.kind == "import":
             # An import's effect is the module it loads (dialect classes
             # register themselves when created), not the name it binds.
