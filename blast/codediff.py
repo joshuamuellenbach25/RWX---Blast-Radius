@@ -424,6 +424,22 @@ def _unbound_body(body: list, bound: set[str]) -> str | None:
     return None
 
 
+def _read_before_bound(body: list, outer: set[str]) -> set[str]:
+    """Names the statements of a body read, in source order, before the body
+    binds them: one name per statement at most."""
+    seen = set(outer)
+    found: set[str] = set()
+    for node in body:
+        missing = _unbound_load(node, seen)
+        if missing:
+            found.add(missing)
+        sure = _sure_binds(node)
+        if sure is None:  # nothing after a statement that always raises runs
+            break
+        seen |= sure
+    return found
+
+
 def _target_names(target: ast.AST | None) -> set[str]:
     return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} if target is not None else set()
 
@@ -759,6 +775,13 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
         # also sees the module's names bound before the class statement.
         bound: set[str] = set()
         new_body_binds = {name for node in new_body for name in _binds(node)}
+        # A statement moved below an unchanged one that reads its name
+        # (HINT_START under KEYWORDS) breaks that read, which no changed
+        # statement shows: compare the whole body's reads in order.
+        if old_keys != new_keys:
+            moved = _read_before_bound(new_body, module_bound) - _read_before_bound(old_body, module_bound)
+            for name in sorted(moved):
+                found.append(Binding(owner, f"<read before bound {name}>", "class-call" if owner else "import-risk"))
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             olds, news = old_body[i1:i2], new_body[j1:j2]
             if tag == "equal":
