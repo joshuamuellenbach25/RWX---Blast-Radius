@@ -220,6 +220,9 @@ def quiet_stdout() -> None:
     reach the answers on stdout."""
     import os
 
-    sys.stdout.flush()
+    try:
+        sys.stdout.flush()
+    except OSError:  # a broken stderr pipe: what it refused is lost either way
+        pass
     os.dup2(2, 1)
     sys.stdout = sys.stderr
