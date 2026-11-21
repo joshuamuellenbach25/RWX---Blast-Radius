@@ -173,6 +173,8 @@ def run_tests(
     failed: set[int] = set()
     suite = unittest.TestSuite()
     modules = []
+    load_errors = 0
+    load_error_kind = None
     for test in order_tests(tests):
         module_name = test["file"][: -len(".py")].replace("/", ".")
         _, class_name, method = test["id"].split("::")
@@ -180,8 +182,16 @@ def run_tests(
             module = importlib.import_module(module_name)
             suite.addTest(getattr(module, class_name)(method))
             modules.append(module)
-        except Exception:  # a test file that cannot be imported fails all its tests
+        except Exception as error:  # a test file that cannot be imported fails all its tests
             failed.add(test["number"])
+            load_errors += 1
+            if load_error_kind is None:
+                if isinstance(error, ImportError):
+                    load_error_kind = "import"
+                elif isinstance(error, (AttributeError, ValueError)):
+                    load_error_kind = "lookup"
+                else:
+                    load_error_kind = type(error).__name__
     inline_pool.install(modules)
     previous = signal.signal(signal.SIGALRM, _on_alarm)
     recorder = _Recorder(limits)
@@ -204,6 +214,8 @@ def run_tests(
         "errors": len(recorder.errors),
         # Every test ran, even when the last one failed and set shouldStop.
         "complete": recorder.testsRun >= len(tests),
+        "load_errors": load_errors,
+        "load_error_kind": load_error_kind,
     }
     return failed, summary
 

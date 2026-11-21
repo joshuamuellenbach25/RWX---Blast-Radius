@@ -164,14 +164,20 @@ def _report_stage(stage: int, job_count: int, result_count: int, commit_count: i
 
 def _add_fleet_signal(answered, jobs, results, duration_ms) -> None:
     """Temporary practice-board diagnostic. The board shows only totals, to
-    the millisecond per run, so 16a + 4b + c tests recorded at 1 ms go on the
-    busiest worker of the first commit that lists any test, where a, b and c
-    (each at most 3) count the local-run jobs, the results that ran and the
-    complete results with no failure. At most 63 ms: the 0.1 s total does not
-    move, and no test that can fail is left out."""
+    the millisecond per run, so 64a + 16k + 4e + f tests recorded at 1 ms go
+    on the busiest worker of the first commit that lists any test. Among the
+    local-run results that came back, a counts those where a test could not
+    be loaded, k is the kind of the first such failure (1 import, 2 lookup,
+    3 other), e counts those with a test error and f those with only
+    assertion failures (each count at most 3). At most 255 ms, and no test
+    that can fail is left out."""
     ran = [result for result in results.values() if result.get("ok")]
-    clean = [r for r in ran if not r.get("failed") and r.get("summary", {}).get("complete")]
-    code = 16 * min(len(jobs), 3) + 4 * min(len(ran), 3) + min(len(clean), 3)
+    loader = [r for r in ran if r.get("summary", {}).get("load_errors")]
+    kind = {"import": 1, "lookup": 2}.get(loader[0]["summary"].get("load_error_kind"), 3) if loader else 0
+    rest = [r for r in ran if not r.get("summary", {}).get("load_errors")]
+    errors = [r for r in rest if r.get("summary", {}).get("errors")]
+    failures = [r for r in rest if not r.get("summary", {}).get("errors") and r.get("failed")]
+    code = 64 * min(len(loader), 3) + 16 * kind + 4 * min(len(errors), 3) + min(len(failures), 3)
     for commit, workers in answered:
         if not workers:
             continue
@@ -181,7 +187,7 @@ def _add_fleet_signal(answered, jobs, results, duration_ms) -> None:
             return
         busiest = max(workers, key=lambda worker: sum(duration_ms[number] for number in worker))
         busiest.extend(tiny)
-        log(f"fleet signal {code} ms on {commit}: {len(jobs)} jobs, {len(ran)} ran, {len(clean)} clean")
+        log(f"fleet signal {code} ms on {commit}: {len(jobs)} jobs, {len(ran)} ran, {len(loader)} load errors, {len(errors)} errors, {len(failures)} failures")
         return
 
 
