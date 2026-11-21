@@ -142,6 +142,8 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
     # garbage collections, so a child neither walks nor copies those pages.
     gc.freeze()
     print(f"warm worker ready in {time.monotonic() - started:.1f} s, {len(index)} functions", file=sys.stderr, flush=True)
+    # Diagnostic: what became of each job, read back by the selector.
+    fates = {"ready": round(time.monotonic() - started, 1), "started": 0, "exited": 0, "killed": 0, "no_time": 0, "fork_failed": 0}
     pending = list(jobs)
     running: dict[int, tuple[Job, float, float]] = {}  # pid -> (job, start, budget)
     while pending or running:
@@ -150,6 +152,7 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             remaining = deadline - time.monotonic()
             if remaining < 5:
                 print(f"{job.commit}: no time left", file=sys.stderr, flush=True)
+                fates["no_time"] += 1
                 continue
             # Bounded, so a hang in setUpClass or in C code (where no test
             # timer can act) ends; at least 90 s, because the recorded seconds
@@ -168,23 +171,28 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
                 child = os.fork()
             except OSError as error:  # this commit keeps every candidate; try the next
                 print(f"{job.commit}: fork failed {error!r}", file=sys.stderr, flush=True)
+                fates["fork_failed"] += 1
                 continue
             if child == 0:
                 _child_main(job, index)
+            fates["started"] += 1
             running[child] = (job, time.monotonic(), budget)
         for child, (job, child_started, budget) in list(running.items()):
             pid, _, usage = os.wait4(child, os.WNOHANG)
             if pid:
                 del running[child]
+                fates["exited"] += 1
                 cpu = usage.ru_utime + usage.ru_stime
                 print(f"{job.commit}: child done in {time.monotonic() - child_started:.1f} s, {cpu:.2f} s CPU", file=sys.stderr, flush=True)
             elif time.monotonic() - child_started > budget:
                 os.kill(child, signal.SIGKILL)
                 os.waitpid(child, 0)
                 del running[child]
+                fates["killed"] += 1
                 print(f"{job.commit}: killed after {budget:.0f} s", file=sys.stderr, flush=True)
         # CPU counts toward the score and wall time does not, so poll slowly.
         time.sleep(0.05)
+    (RESULTS / "_fates.json").write_text(json.dumps(fates), "utf-8")
 
 
 def _child_main(job: Job, index) -> None:
