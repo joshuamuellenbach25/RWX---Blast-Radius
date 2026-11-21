@@ -494,7 +494,7 @@ def analyze_python(
         return FileVerdict(path, "unknown", everything, "new text does not compile", new_text=new_text)
     function_changes = [change for change in diff.changed if change.swappable]
     function_tests, function_note, runs_at_import = _function_candidates(
-        path, old_text, patch, function_changes, coverage
+        path, old_text, new_text, patch, function_changes, coverage
     )
     if path.startswith(INSPECTED_PREFIX):
         # test_typing compares the bytecode of these modules' annotators
@@ -910,9 +910,11 @@ def _insertion_points(patch, inert: set[int] | frozenset[int] = frozenset()) -> 
     return points
 
 
-def _entry_lines(tree: ast.AST, first_line: int) -> list[int]:
+def _entry_lines(tree: ast.AST, first_line: int, own: set[int] | None = None) -> list[int]:
     """The first executed statement of the function starting at first_line
-    (its def line, or its first decorator's): every call runs it."""
+    (its def line, or its first decorator's): every call runs it. Given the
+    lines the function's own code runs, the first of them in its body, since
+    a declaration (nonlocal, global) runs no code."""
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -923,7 +925,8 @@ def _entry_lines(tree: ast.AST, first_line: int) -> list[int]:
         if len(body) > 1 and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
                 and isinstance(body[0].value.value, str):
             body = body[1:]
-        return [body[0].lineno]
+        executed = [line for line in own or () if line >= body[0].lineno]
+        return [min(executed)] if executed else [body[0].lineno]
     return []
 
 
@@ -974,13 +977,14 @@ def _function_end(tree: ast.AST, first_line: int) -> int | None:
     return None
 
 
-def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int, str, bool]:
+def _function_candidates(path, old_text, new_text, patch, changes, coverage) -> tuple[int, str, bool]:
     if not changes:
         return 0, "", False
     changed_lines = patch.changed_old_lines()
     insertions = _insertion_points(patch, _inert_old_lines(patch, old_text))
     added_new = _added_new_lines(patch)
     tree = None
+    new_spans = None
     own_lines: set[int] = set()
     fallback = 0
     for change in changes:
@@ -1027,11 +1031,19 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         if tree is None:
             tree = parse_cached(old_text)
         end = _function_end(tree, change.old.co_firstlineno) or max(own, default=0)
-        appended = bool(own) and max(new_own & added_new, default=0) > _new_position(patch, end)
+        position = _new_position(patch, end)
+        # A replaced last statement that now wraps over more lines ends where
+        # its new statement ends.
+        if new_spans is None:
+            new_spans = statement_spans(new_text)
+        holding = [span for span in new_spans if span[0] <= position <= span[1]]
+        if holding:
+            position = min(holding, key=lambda span: span[1] - span[0])[1]
+        appended = bool(own) and max(new_own & added_new, default=0) > position
         if own and (reshaped or appended or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
                 tree = parse_cached(old_text)
-            fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno))
+            fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno, own))
         # A lambda that shares its line with code run at import is invisible
         # to the map: import-time lines are left out of every test, and a
         # factory such as rename_func records only the few tests that reached

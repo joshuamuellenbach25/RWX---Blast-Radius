@@ -108,6 +108,12 @@ CHILD_PROCESS_NAMES = {
     "subprocess", "Popen", "check_output", "check_call", "executable", "system", "popen",
     "spawnv", "spawnl", "spawnve", "execv", "execl", "execve", "multiprocessing", "get_context",
 }
+# Names a test uses to read a file's bytes, which a local run takes from the
+# files on disk, never from the patch (a comment it adds is not there).
+FILE_READ_NAMES = {
+    "open", "open_code", "read_text", "read_bytes", "getsource", "getsourcelines", "findsource",
+    "getline", "getlines", "detect_encoding",
+}
 
 
 def _code_names(code) -> set[str]:
@@ -145,8 +151,9 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         if verdict.kind == "test_function":
             edited |= tests
             # A local run patches this process only: an edited test that
-            # starts another interpreter checks the files on disk there.
-            if any(_code_names(change.new) & CHILD_PROCESS_NAMES for change in verdict.swaps):
+            # starts another interpreter, or reads files itself, checks the
+            # files on disk.
+            if any(_code_names(change.new) & (CHILD_PROCESS_NAMES | FILE_READ_NAMES) for change in verdict.swaps):
                 kept |= tests
         if verdict.kind in VERIFIED_KINDS:
             candidates |= tests
