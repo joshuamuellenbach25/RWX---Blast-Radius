@@ -10,6 +10,7 @@ result, and the selector then keeps every candidate for it.
 
 from __future__ import annotations
 
+import gc
 import importlib
 import json
 import os
@@ -75,6 +76,9 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
         except Exception as error:  # the child reports the tests of a broken module as failed
             print(f"warm import {module} failed: {error!r}", file=sys.stderr, flush=True)
     index = runner.function_index()
+    # Children inherit this heap. Frozen objects are skipped by the children's
+    # garbage collections, so a child neither walks nor copies those pages.
+    gc.freeze()
     print(f"warm worker ready in {time.monotonic() - started:.1f} s, {len(index)} functions", file=sys.stderr, flush=True)
     pending = list(jobs)
     running: dict[int, tuple[Job, float, float]] = {}  # pid -> (job, start, budget)
@@ -101,7 +105,8 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
                 os.waitpid(child, 0)
                 del running[child]
                 print(f"{job.commit}: killed after {budget:.0f} s", file=sys.stderr, flush=True)
-        time.sleep(0.02)
+        # CPU counts toward the score and wall time does not, so poll slowly.
+        time.sleep(0.05)
 
 
 def _child_main(job: Job, index) -> None:
@@ -150,7 +155,7 @@ def verify(jobs: list[Job], deadline: float) -> dict[str, dict]:
             os.waitpid(worker, 0)
             print("warm worker killed at the deadline", file=sys.stderr, flush=True)
             break
-        time.sleep(0.05)
+        time.sleep(0.25)
     results = {}
     for job in jobs:
         path = RESULTS / f"{job.commit}.json"
