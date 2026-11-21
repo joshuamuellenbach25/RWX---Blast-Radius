@@ -19,6 +19,9 @@ class Hunk:
     new_start: int
     new_count: int
     lines: list[str] = field(default_factory=list)  # each starts with " ", "-" or "+"
+    # "\ No newline at end of file" after the old or the new side's last line
+    old_no_newline: bool = False
+    new_no_newline: bool = False
 
 
 @dataclass
@@ -146,11 +149,19 @@ def parse_patch(text: str) -> list[FilePatch]:
             current.hunks.append(hunk)
             index += 1
             old_seen = new_seen = 0
-            while index < len(lines) and (old_seen < hunk.old_count or new_seen < hunk.new_count):
+            while index < len(lines):
                 body = lines[index]
                 if body.startswith("\\"):
+                    # "\ No newline at end of file", also after the hunk's
+                    # last line: the line before it ends its side's file.
+                    if hunk.lines:
+                        previous = hunk.lines[-1][:1]
+                        hunk.old_no_newline |= previous in " -"
+                        hunk.new_no_newline |= previous in " +"
                     index += 1
                     continue
+                if old_seen >= hunk.old_count and new_seen >= hunk.new_count:
+                    break
                 tag = body[:1] if body else " "
                 if tag not in " -+":
                     raise PatchError(f"unexpected hunk line: {body!r}")
@@ -195,6 +206,12 @@ def apply_file_patch(old_text: str | None, patch: FilePatch) -> str | None:
             cursor += 1
     new_lines.extend(old_lines[cursor:])
     text = "\n".join(new_lines)
+    # The final newline follows the markers: the new side's marks a file
+    # that now ends without one, the old side's alone a patch that adds it.
+    if any(hunk.new_no_newline for hunk in patch.hunks):
+        trailing_newline = False
+    elif any(hunk.old_no_newline for hunk in patch.hunks):
+        trailing_newline = True
     if new_lines and trailing_newline:
         text += "\n"
     return text
