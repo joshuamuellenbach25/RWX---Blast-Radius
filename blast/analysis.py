@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -199,14 +200,14 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
         return FileVerdict(path, "unknown", everything, "runner configuration", new_text=new_text)
 
     if path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):
-        return analyze_python(path, old_text, new_text, patch, coverage)
+        return analyze_python(path, old_text, new_text, patch, coverage, source_root)
     if old_text == new_text:
         return FileVerdict(path, "same", 0, "text unchanged", new_text=new_text)
     return FileVerdict(path, "fixture" if readers else "other", readers, new_text=new_text)
 
 
 def analyze_python(
-    path: str, old_text: str, new_text: str, patch: FilePatch, coverage: CoverageMap
+    path: str, old_text: str, new_text: str, patch: FilePatch, coverage: CoverageMap, source_root: Path
 ) -> FileVerdict:
     everything = coverage.all_tests
     filename = "/sqlglot/" + path
@@ -236,10 +237,74 @@ def analyze_python(
         bindings = changed_bindings(old_text, new_text)
     except SyntaxError as error:
         return FileVerdict(path, "module", everything, f"cannot compare statements: {error}", new_text=new_text)
-    tests, notes = _binding_candidates(path, bindings, coverage)
+    tests, notes = _binding_candidates(path, bindings, coverage, source_root)
     return FileVerdict(
         path, "module", tests | function_tests, f"{notes}; {function_note}", function_changes, new_text
     )
+
+
+ON_DEMAND_PREFIXES = ("sqlglot/dialects/", "sqlglot/generators/", "sqlglot/parsers/", "sqlglot/typing/")
+# The files under those folders that `import sqlglot` loads at the pinned
+# commit (measured from sys.modules after the import).
+LOADED_WITH_SQLGLOT = {
+    "sqlglot/dialects/__init__.py", "sqlglot/dialects/dialect.py", "sqlglot/parsers/__init__.py",
+    "sqlglot/parsers/base.py", "sqlglot/typing/__init__.py",
+}
+# Unindented imports run when their file loads; indented ones run later or never.
+_PART_IMPORT = re.compile(r"^(?:from|import) ((?:sqlglot\.(?:dialects|generators|parsers|typing)|tests)(?:\.\w+)+)", re.M)
+_DIALECT_NAMES = re.compile(r"^from sqlglot\.dialects import (?:\(([^)]*)\)|([\w ,]+))", re.M)
+_import_graphs: dict[Path, dict[str, set[str]]] = {}
+
+
+def _loaded_on_demand(path: str) -> bool:
+    """Dialect parts load when a dialect is first used; everything else under
+    sqlglot loads with `import sqlglot`."""
+    return path.startswith(ON_DEMAND_PREFIXES) and path not in LOADED_WITH_SQLGLOT and not path.endswith("/__init__.py")
+
+
+def _top_level_imports(source_root: Path, rel: str) -> set[str]:
+    """Dialect parts and test modules that `rel` imports as it loads."""
+    text = (source_root / rel).read_text("utf-8")
+    found = {match.group(1).replace(".", "/") + ".py" for match in _PART_IMPORT.finditer(text)}
+    for match in _DIALECT_NAMES.finditer(text):
+        # sqlglot.dialects loads a dialect's module on first access to its name.
+        for name in re.split(r"[\s,]+", match.group(1) or match.group(2)):
+            if name:
+                found.add(f"sqlglot/dialects/{name.lower()}.py")
+    return {rel_path for rel_path in found if (source_root / rel_path).is_file()}
+
+
+def _test_files_loading(source_root: Path, path: str) -> list[str]:
+    """Test files that load `path` while they load, directly or through the
+    dialect parts and test modules they import (33 dialect test files import
+    tests/dialects/test_dialect.py, which imports five dialects). If `path`
+    raises on import, every test in these files fails."""
+    graph = _import_graphs.get(source_root)
+    if graph is None:
+        tests_dir = source_root / "tests"
+        if not tests_dir.is_dir():
+            raise FileNotFoundError(f"no test folder at {tests_dir}")
+        graph = {}
+        pending = [file.relative_to(source_root).as_posix() for file in sorted(tests_dir.rglob("*.py"))]
+        while pending:
+            rel = pending.pop()
+            if rel not in graph:
+                graph[rel] = _top_level_imports(source_root, rel)
+                pending.extend(graph[rel] - graph.keys())
+        _import_graphs[source_root] = graph
+    loading = []
+    for test_file in graph:
+        if not test_file.startswith("tests/"):
+            continue
+        seen, stack = set(), [test_file]
+        while stack:
+            current = stack.pop()
+            if current not in seen:
+                seen.add(current)
+                stack.extend(graph.get(current, ()))
+        if path in seen:
+            loading.append(test_file)
+    return loading
 
 
 def _module_name(path: str) -> str:
@@ -247,7 +312,7 @@ def _module_name(path: str) -> str:
     return module[: -len(".__init__")] if module.endswith(".__init__") else module
 
 
-def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int, str]:
+def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root: Path) -> tuple[int, str]:
     """Tests that can see a changed module-level or class-level binding."""
     everything = coverage.all_tests
     if not bindings:
@@ -263,11 +328,17 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int
             return everything, "a changed module-level statement calls code at import"
         if binding.kind == "class-call":
             # A class-body call that raises at import breaks every test that
-            # loads this file: the ones that create the class (a dialect
-            # module holds little runtime code of its own) and the ones that
-            # ran some of the file's code. With neither known, list everything.
+            # loads this file. A core module loads with sqlglot itself, so
+            # that is every test. A dialect part or a test module loads on
+            # demand: the tests that create the class (a dialect module holds
+            # little runtime code of its own), the ones that ran the file's
+            # code, and every test in a test file that imports it as it loads.
+            if not (_loaded_on_demand(path) or path.startswith("tests/")):
+                return everything, f"{'.'.join(binding.owner)}: class-body call in a module sqlglot imports"
             loaders = coverage.tests_creating(f"{module}:{'.'.join(binding.owner)}")
             loaders |= coverage.tests_touching_file(path)
+            for test_file in _test_files_loading(source_root, path):
+                loaders |= coverage.tests_in_test_file(test_file)
             if not loaders:
                 return everything, f"{'.'.join(binding.owner)}: class-body call, no test known to load it"
             tests |= loaders
