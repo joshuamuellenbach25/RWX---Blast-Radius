@@ -515,7 +515,15 @@ def analyze_python(
         swaps = function_changes + list(diff.ancestors)
         return FileVerdict(path, kind, function_tests, function_note, swaps, new_text, listed)
 
-    if runs_at_import or diff.unmatched:
+    # New code with no old counterpart (a method added to a test class) acts
+    # in a test module only through the names its statements bind, which the
+    # binding reading below covers; sqlglot imports no tests. A new class is
+    # the exception: its metaclass runs as the tests are collected and can
+    # register it for every test (a Dialect subclass).
+    test_module_names = path.startswith("tests/") and not any(
+        qualname in _class_qualnames(new_text) for qualname, _ in diff.unmatched
+    )
+    if runs_at_import or (diff.unmatched and not test_module_names):
         return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
     try:
         bindings = changed_bindings(old_text, new_text, _star_names(source_root, new_text))
@@ -742,6 +750,25 @@ def _module_name(path: str) -> str:
     return module[: -len(".__init__")] if module.endswith(".__init__") else module
 
 
+def _class_qualnames(text: str) -> set[str]:
+    """The qualified name of every class the text defines, nested ones and
+    ones inside functions included (Outer.<locals>.Inner)."""
+    names: set[str] = set()
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                names.add(prefix + child.name)
+                visit(child, f"{prefix}{child.name}.")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, f"{prefix}{child.name}.<locals>.")
+            else:
+                visit(child, prefix)
+
+    visit(parse_cached(text), "")
+    return names
+
+
 def _module_loaders(path: str, coverage: CoverageMap, source_root: Path) -> int:
     """The tests that load a module. Every module that imports it loads it
     too: the tests that create any of their classes, and every test of the
@@ -808,7 +835,8 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
                 # What a value read at import builds lives in the modules that
                 # load it. A dialect part loads on demand, so only its loaders
                 # can see it; a load that now fails is the import check's.
-                loaders = _module_loaders(path, coverage, source_root) if _loaded_on_demand(path) else 0
+                on_demand = _loaded_on_demand(path) or path.startswith("tests/")
+                loaders = _module_loaders(path, coverage, source_root) if on_demand else 0
                 if not loaders:
                     return everything, f"module global {name} is read at import"
                 tests |= loaders | readers | body
@@ -822,6 +850,13 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
         if binding.kind == "class":
             creators |= coverage.tests_creating(f"{owner_key}.{name}")
         if not creators:
+            # A test class's names reach only the tests of the test files
+            # that load its module (sqlglot imports no tests), which the
+            # caller lists, and the code that reads them by name.
+            if path.startswith("tests/"):
+                tests |= readers | body
+                notes.append(f"{owner_key}.{name}: test class, readers")
+                continue
             # The class is created at import, before any test: a value read
             # at import can break whatever module reads it, so every test.
             if read_at_import:
