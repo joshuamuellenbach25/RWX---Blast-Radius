@@ -345,6 +345,52 @@ def _calls_code(node: ast.stmt) -> bool:
 
 
 DUNDER = re.compile(r"__\w+__")
+# Whether the module being compared evaluates annotations when it runs:
+# without "from __future__ import annotations" a def evaluates its argument
+# and return annotations, and a module or class level x: T = v evaluates T.
+# Set by changed_bindings for the module it compares.
+_ANNOTATIONS_RUN = False
+
+
+def _lazy_annotations(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.ImportFrom) and node.module == "__future__" and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
+
+
+def _evaluated_parts(node: ast.stmt) -> list:
+    """The expressions a def, class or simple statement evaluates when it
+    runs at import, the reads inside its assignment targets included."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+        if _ANNOTATIONS_RUN:
+            arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs, node.args.vararg, node.args.kwarg]
+            parts += [argument.annotation for argument in arguments if argument is not None and argument.annotation is not None]
+            parts += [node.returns] if node.returns is not None else []
+        return parts
+    if isinstance(node, ast.ClassDef):
+        return [*node.bases, *node.keywords, *node.decorator_list]
+    if isinstance(node, ast.Expr):
+        return [node.value]
+    if isinstance(node, ast.AnnAssign):
+        parts = [node.value] if node.value is not None else []
+        parts += [node.annotation] if _ANNOTATIONS_RUN else []
+        targets = [node.target]
+    elif isinstance(node, (ast.Assign, ast.AugAssign)):
+        parts = [node.value]
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    else:
+        return []
+    # A subscript or attribute target reads its object first: pretty[0] =
+    # False reads pretty, and raises when nothing bound it.
+    for target in targets:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Subscript):
+                parts += [sub.value, sub.slice]
+            elif isinstance(sub, ast.Attribute):
+                parts.append(sub.value)
+    return parts
 ALWAYS_BOUND = set(dir(builtins)) | {
     "__file__", "__path__", "__spec__", "__loader__", "__package__", "__builtins__", "__module__", "__qualname__",
 }
@@ -484,16 +530,9 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
             or _unbound_body(node.orelse, after)
             or _unbound_body(node.finalbody, after)
         )
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
-    elif isinstance(node, ast.ClassDef):
-        parts = [*node.bases, *node.keywords, *node.decorator_list]
-    elif isinstance(node, ast.AnnAssign):
-        parts = [node.value] if node.value is not None else []
-    elif isinstance(node, (ast.Assign, ast.AugAssign, ast.Expr)):
-        parts = [node.value]
-    else:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.AnnAssign, ast.Assign, ast.AugAssign, ast.Expr)):
         return None
+    parts = _evaluated_parts(node)
     # An augmented assignment reads its target first. In a class body an
     # inherited name is not in the class namespace, so that read raises.
     if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
@@ -538,12 +577,15 @@ def _operations(nodes: list) -> Counter:
     import (lambda bodies run later; compound statements are not read)."""
     found: Counter = Counter()
     for node in nodes:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
-        elif isinstance(node, ast.ClassDef):
-            parts = [*node.bases, *node.keywords, *node.decorator_list]
-        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
-            parts = [node.value] if node.value is not None else []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
+            parts = _evaluated_parts(node)
+            # Storing through a subscript or attribute can raise (item
+            # assignment on a constant); a store already made here cannot.
+            targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
+            for target in targets:
+                for sub in ast.walk(target) if target is not None else ():
+                    if isinstance(sub, (ast.Subscript, ast.Attribute)) and isinstance(sub.ctx, ast.Store):
+                        found[f"Store.{ast.unparse(sub)}"] = 1
         elif _branches(node) or _headers(node):
             # A compound statement runs its own expressions and the
             # statements of every branch that can run. An if TYPE_CHECKING:
@@ -763,7 +805,18 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
         return found
 
-    return compare(parse_cached(old_text).body, ast.parse(new_text).body, (), set())
+    global _ANNOTATIONS_RUN
+    old_tree, new_tree = parse_cached(old_text), ast.parse(new_text)
+    old_lazy, new_lazy = _lazy_annotations(old_tree), _lazy_annotations(new_tree)
+    _ANNOTATIONS_RUN = not new_lazy
+    try:
+        found = compare(old_tree.body, new_tree.body, (), set())
+    finally:
+        _ANNOTATIONS_RUN = False
+    # Dropping the future import makes every annotation in the module run.
+    if old_lazy and not new_lazy:
+        found.append(Binding((), "<annotations evaluated>", "import-risk"))
+    return found
 
 
 def statement_spans(source: str) -> list[tuple[int, int]]:
