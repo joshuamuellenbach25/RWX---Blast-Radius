@@ -288,6 +288,10 @@ def _signature_key(node: ast.stmt) -> tuple:
     return ("stmt", ast.dump(node))
 
 
+def _class_header(node: ast.ClassDef) -> tuple:
+    return tuple(ast.dump(item) for item in (*node.bases, *node.keywords))
+
+
 def _base_name(node: ast.AST) -> str | None:
     while isinstance(node, (ast.Attribute, ast.Subscript, ast.Call, ast.Starred)):
         node = node.func if isinstance(node, ast.Call) else node.value
@@ -830,6 +834,17 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             special = sorted(name for name in changed_names if DUNDER.fullmatch(name))
             if special:
                 found.append(Binding(owner, f"<{', '.join(special)}>", "class-call" if owner else "import-risk"))
+            # A class whose bases or keywords change can fail to be built at
+            # import (Exception put before a subclass of it leaves no
+            # consistent method order), whatever its body holds.
+            old_headers = {node.name: _class_header(node) for node in olds if isinstance(node, ast.ClassDef)}
+            rebased = sorted(
+                node.name
+                for node in news
+                if isinstance(node, ast.ClassDef) and node.name in old_headers and old_headers[node.name] != _class_header(node)
+            )
+            if rebased:
+                found.append(Binding(owner, f"<new bases of {', '.join(rebased)}>", "class-call" if owner else "import-risk"))
             # A value whose kind changes (a dict made None) can break the code
             # that reads it at import, such as a metaclass building tables.
             old_kinds, new_kinds = _value_kinds(olds), _value_kinds(news)
