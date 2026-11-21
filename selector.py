@@ -138,6 +138,17 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         kept |= set(unknown_tests)
     candidates -= kept
     if not verifiable:
+        # A changed module body can raise at import where no static reading
+        # shows it (a metaclass indexing a table key made ""): the worker runs
+        # the old and the new body, and a new failure lists every test.
+        sources = [
+            (verdict.path[: -len(".py")].replace("/", ".").removesuffix(".__init__"), verdict.path, verdict.new_text)
+            for verdict in analysis.files
+            if verdict.kind == "module" and verdict.new_text is not None
+            and verdict.path.startswith("sqlglot/") and verdict.path.endswith(".py")
+        ]
+        if sources and len(kept | candidates) < len(by_number):
+            jobs.append(Job(commit=commit, tests=[], sources=sources, modules={name for name, _, _ in sources}, value=float("inf")))
         return kept | candidates, set(), set()
     # A local run cannot vouch for a test that starts its own process, so such
     # a candidate is always listed, whatever the local run shows.
@@ -338,7 +349,10 @@ def main() -> None:
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
-        if cheap and result and result.get("ok"):
+        if result and result.get("import_failed"):
+            chosen = set(all_numbers)
+            how = f"patched {result['import_failed']} fails to import"
+        elif cheap and result and result.get("ok"):
             failed = set(result["failed"]) & cheap
             complete = bool(result.get("summary", {}).get("complete"))
             if failed:

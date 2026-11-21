@@ -17,6 +17,7 @@ import os
 import signal
 import sys
 import time
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,15 +34,65 @@ class Job:
     required: list = field(default_factory=list)  # old codes that must have live functions
     modules: set[str] = field(default_factory=set)  # modules to import before forking
     value: float = 0.0  # expected saving net of CPU, in ms: the selector runs the largest first
+    # (module name, path under the source root, new text): each body runs as
+    # an import would before any test, see _import_failure.
+    sources: list = field(default_factory=list)
 
 
 def _limit(test: dict) -> float:
     return 3.0 + 6.0 * test["seconds"]
 
 
+def _body_runs(name: str, filename: str, text: str) -> bool:
+    """Runs a module body in a fresh module object in a forked child, as an
+    import of the module would; True when it raises nothing."""
+    child = os.fork()
+    if child == 0:
+        code = 3
+        try:
+            # A body that never finishes must not outlive its job: the
+            # alarm's default action ends this child after 10 s.
+            signal.alarm(10)
+            module = types.ModuleType(name)
+            module.__file__ = filename
+            module.__package__ = name if filename.endswith("__init__.py") else name.rpartition(".")[0]
+            sys.modules[name] = module
+            exec(compile(text, filename, "exec"), module.__dict__)
+            code = 0
+        except BaseException:  # SystemExit too: the import would fail
+            pass
+        finally:
+            os._exit(code)
+    _, status = os.waitpid(child, 0)
+    return os.waitstatus_to_exitcode(status) == 0
+
+
+def _import_failure(sources: list, root: str = "/sqlglot") -> str:
+    """The changed module whose new body raises where its old body ran clean,
+    each run as an import would (a metaclass reading a table built with an
+    empty key raises IndexError at import, which no static reading shows);
+    "" when there is none. A module whose old body also raises when run
+    again is no evidence either way."""
+    for name, path, new_text in sources:
+        filename = os.path.join(root, path)
+        try:
+            with open(filename, encoding="utf-8") as handle:
+                old_text = handle.read()
+        except OSError:
+            continue
+        if _body_runs(name, filename, old_text) and not _body_runs(name, filename, new_text):
+            return name
+    return ""
+
+
 def _run_job(job: Job, index) -> dict:
     from blast import runner
 
+    failure = _import_failure(job.sources)
+    if failure:
+        return {"commit": job.commit, "ok": True, "import_failed": failure, "failed": [], "summary": {}}
+    if not job.tests:
+        return {"commit": job.commit, "ok": True, "failed": [], "summary": {"complete": True, "run": 0}}
     counts = runner.swap_functions(job.pairs, index)
     swapped = sum(counts)
     # A function defined at import time must exist and must now run the new
