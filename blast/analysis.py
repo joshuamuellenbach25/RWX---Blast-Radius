@@ -23,6 +23,11 @@ RUNNER_CONFIG = {
     "tests/__init__.py", "tests/helpers.py",
 }
 
+# Parsing and compiling a module takes about 90 times its text in memory.
+# The largest sqlglot module is about 0.4 MB; a patched module past this size
+# lists every test instead of risking the container's memory.
+MAX_PYTHON_CHARS = 2_000_000
+
 
 class _MaskTable:
     """key -> bitmask of tests, decoded from the map's shared sets on use."""
@@ -211,6 +216,8 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
         return FileVerdict(path, "unknown", everything, "runner configuration", new_text=new_text)
 
     if path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):
+        if len(new_text) > MAX_PYTHON_CHARS:
+            return FileVerdict(path, "unknown", everything, f"patched module of {len(new_text)} characters, too large to parse", new_text=new_text)
         return analyze_python(path, old_text, new_text, patch, coverage, source_root)
     if old_text == new_text:
         return FileVerdict(path, "same", 0, "text unchanged", new_text=new_text)
