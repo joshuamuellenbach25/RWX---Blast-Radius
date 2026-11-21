@@ -1,12 +1,13 @@
 # Status
 
-Updated 2026-11-21 00:29 EST (practice board read at 00:29:39).
+Updated 2026-11-21 01:29 EST (practice board read at 01:20:40).
 
 | Measure | Seconds |
 |---|---|
-| Our best practice score | 256.3 |
-| Best score on the practice board | 149.7 |
-| Our target (that score minus 10%) | 134.73 |
-| Local run of main on the 30 sample commits (scorer flags) | 148.3 |
+| Our best practice score | 256.0 |
+| Best score on the practice board | 146.3 |
+| Our target (that score minus 10%) | 131.67 |
+| Local run of 304103a on the 30 sample commits (scorer flags) | 148.3 |
+| Main on the 30 sample commits, sample answers as the oracle (estimate) | 130.7 |
 
-Open problem: the local test runs that prune candidates do not take effect on the practice fleet; both scored runs show the main process alone.
+Open problem: the local test runs prune nothing on the practice fleet. The leading explanation is wall-clock test limits ending CPU-starved runs early; test limits now count CPU seconds.
