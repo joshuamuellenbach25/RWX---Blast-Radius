@@ -608,20 +608,32 @@ def _value_kinds(nodes: list) -> dict[str, str]:
     return kinds
 
 
+def _tag(node: ast.AST) -> str:
+    """A node's kind; a tuple also keeps its length, since code unpacks a
+    pair by position."""
+    if isinstance(node, ast.Tuple):
+        return f"Tuple{len(node.elts)}"
+    return _kind(node)
+
+
 def _shapes(node: ast.AST, prefix: str = "") -> set[str]:
     """The kinds of the elements of a literal container, with the containers
-    they sit in: [("x", "y")] gives List>Tuple and List>Tuple>Constant.str."""
+    they sit in: [("x", "y")] gives List>Tuple2 and List>Tuple2>Constant.str.
+    Dict keys and values are kept apart. Only a nested tuple keeps its
+    length, since the value itself may be a tuple of names that grows."""
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        inner = list(node.elts)
+        groups = [("", list(node.elts))]
     elif isinstance(node, ast.Dict):
-        inner = [n for n in (*node.keys, *node.values) if n is not None]
+        groups = [(".key", [n for n in node.keys if n is not None]), (".value", list(node.values))]
     else:
         return set()
-    here = f"{prefix}{type(node).__name__}>"
+    name = _tag(node) if prefix else type(node).__name__
     found: set[str] = set()
-    for element in inner:
-        found.add(here + _kind(element))
-        found |= _shapes(element, here)
+    for suffix, elements in groups:
+        here = f"{prefix}{name}{suffix}>"
+        for element in elements:
+            found.add(here + _tag(element))
+            found |= _shapes(element, here)
     return found
 
 
