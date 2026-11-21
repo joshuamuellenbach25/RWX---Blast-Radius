@@ -41,6 +41,9 @@ class Job:
     # Run the tests in a fresh interpreter that loads every source's patched
     # text (blast.fresh), for changes a function swap cannot apply.
     fresh: bool = False
+    # What a clean run saves over listing its tests, in simulated ms (0 for
+    # an import check): the most CPU the run may spend, see _warm_worker.
+    saving_ms: float = 0.0
 
 
 def _exec_fresh(job: Job) -> None:
@@ -251,6 +254,11 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
                 max(10.0, remaining - reserve),
                 max(90.0, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests)),
             )
+            # Its CPU counts toward the score: a run that goes on past the
+            # most it can save loses even when it comes back clean, and the
+            # gate admitted it only below half of that.
+            if job.saving_ms > 0:
+                budget = min(budget, max(10.0, job.saving_ms / 1000))
             try:
                 child = os.fork()
             except OSError as error:  # this commit keeps every candidate; try the next

@@ -183,12 +183,12 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         unproxied = {n for n in slow if _class_of(by_number[n]) not in run_classes}
         plans.append((kept | costly | unproxied, cheap - costly, slow - unproxied))
     listed_ms = _cost_ms(kept | cheap | slow, by_number)
-    best, best_margin = None, 0.0
+    best, best_margin, best_saving = None, 0.0, 0.0
     for plan_kept, plan_run, plan_slow in plans:
         saving_ms = listed_ms - _cost_ms(plan_kept, by_number)
         margin = RUN_SHARE * saving_ms - _run_cost_ms(plan_run, by_number) - (FRESH_START_MS if fresh else 0)
         if margin >= best_margin:
-            best, best_margin = (plan_kept, plan_run, plan_slow), margin
+            best, best_margin, best_saving = (plan_kept, plan_run, plan_slow), margin, saving_ms
     if best is None:
         if fresh:
             _add_import_check(analysis, kept | cheap | slow, by_number, jobs, commit)
@@ -198,7 +198,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
     jobs.append(Job(
         commit=commit, tests=run, pairs=pairs, required=required, modules=modules, value=best_margin,
-        sources=sources if fresh else [], fresh=fresh,
+        sources=sources if fresh else [], fresh=fresh, saving_ms=best_saving,
     ))
     return kept, cheap, slow
 
