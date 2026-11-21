@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import dis
 import importlib.machinery
 import importlib.util
 import inspect
@@ -234,6 +235,7 @@ class FileVerdict:
     note: str = ""
     swaps: list = field(default_factory=list)  # ChangedCode list for function changes
     new_text: str | None = None
+    listed: int = 0  # tests to list without a local run, which cannot show them
 
 
 @dataclass
@@ -499,12 +501,19 @@ def analyze_python(
         # test_typing compares the bytecode of these modules' annotators
         # without running them, so line coverage never names it.
         function_tests |= coverage.tests_in_test_file(INSPECTING_TEST_FILE)
+    # A test that leaves a changed attribute on a shared object breaks the
+    # tests that read it after it in one process; a local run of one test
+    # per process cannot show that, so they are listed.
+    listed = 0
+    if path.startswith("tests/") and function_changes:
+        for name in _shared_stores(function_changes, _added_new_lines(patch)):
+            listed |= coverage.names.get(name, 0)
     if diff.function_level_only:
         if runs_at_import:
             return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
         kind = "test_function" if path.startswith("tests/") else "module" if docs_changed else "function"
         swaps = function_changes + list(diff.ancestors)
-        return FileVerdict(path, kind, function_tests, function_note, swaps, new_text)
+        return FileVerdict(path, kind, function_tests, function_note, swaps, new_text, listed)
 
     if runs_at_import or diff.unmatched:
         return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
@@ -521,7 +530,7 @@ def analyze_python(
             tests |= coverage.tests_in_test_file(test_file)
         notes += "; every test of the test files that load it"
     return FileVerdict(
-        path, "module", tests | function_tests, f"{notes}; {function_note}", function_changes, new_text
+        path, "module", tests | function_tests, f"{notes}; {function_note}", function_changes, new_text, listed
     )
 
 
@@ -938,6 +947,37 @@ def _entry_lines(tree: ast.AST, first_line: int, own: set[int] | None = None) ->
         executed = [line for line in own or () if line >= body[0].lineno]
         return [min(executed)] if executed else [body[0].lineno]
     return []
+
+
+def _shared_stores(changes, added: set[int]) -> set[str]:
+    """Attributes that changed test code sets or deletes on lines the patch
+    adds, on an object other than the test itself (Snowflake.parser_class =
+    None in a cleanup): the tests after it in the same process see the new
+    value. A setattr or delattr call counts the strings on its line."""
+    names: set[str] = set()
+    stack = [change.new for change in changes]
+    while stack:
+        code = stack.pop()
+        stack.extend(const for const in code.co_consts if hasattr(const, "co_code"))
+        first = code.co_varnames[0] if code.co_argcount else None
+        instructions = list(dis.get_instructions(code))
+        call_lines = set()
+        for previous, instruction in zip([None, *instructions], instructions):
+            line = instruction.positions.lineno if instruction.positions else None
+            if line not in added:
+                continue
+            if instruction.opname in ("STORE_ATTR", "DELETE_ATTR"):
+                loaded = previous.argval if previous is not None else None
+                owner = loaded[-1] if isinstance(loaded, tuple) else loaded
+                if not (previous is not None and previous.opname.startswith("LOAD_FAST") and owner == first):
+                    names.add(instruction.argval)
+            elif instruction.opname in ("LOAD_GLOBAL", "LOAD_NAME") and instruction.argval in ("setattr", "delattr"):
+                call_lines.add(line)
+        for instruction in instructions:
+            if instruction.opname == "LOAD_CONST" and isinstance(instruction.argval, str) \
+                    and instruction.positions and instruction.positions.lineno in call_lines:
+                names.add(instruction.argval)
+    return names
 
 
 def _added_new_lines(patch) -> set[int]:

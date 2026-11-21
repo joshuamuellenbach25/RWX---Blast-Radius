@@ -148,6 +148,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     fresh = False
     for verdict in analysis.files:
         tests = runtime(verdict.tests)
+        kept |= runtime(verdict.listed)
         if verdict.kind == "test_function":
             edited |= tests
             # A local run patches this process only: an edited test that
