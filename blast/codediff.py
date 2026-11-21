@@ -593,6 +593,11 @@ def _operations(nodes: list) -> Counter:
     for node in nodes:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
             parts = _evaluated_parts(node)
+            # A decorator is called with what it decorates; a new one can
+            # raise when the class or module is built (@seq_get needs two
+            # arguments), one already applied here cannot.
+            for decorator in getattr(node, "decorator_list", []):
+                found[f"Decorator.{ast.unparse(decorator)}"] = 1
             # Storing through a subscript or attribute can raise (item
             # assignment on a constant); a store already made here cannot.
             targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
@@ -607,6 +612,10 @@ def _operations(nodes: list) -> Counter:
             parts = [] if isinstance(node, ast.If) and _never_runs(node.test) else _headers(node)
             for branch in _branches(node):
                 found += _operations(branch)
+            # Looping over a value raises when it cannot be iterated
+            # (for i in 1:), whatever names its header reads.
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                found[f"Iter.{_kind(node.iter)}"] += 1
         else:
             continue
         # A target that unpacks raises when the value has another length or
@@ -642,6 +651,8 @@ def _operations(nodes: list) -> Counter:
                         found["Unhashable"] += 1
             elif isinstance(sub, ast.Starred):
                 found["Starred"] += 1
+            elif isinstance(sub, ast.comprehension):
+                found[f"Iter.{_kind(sub.iter)}"] += 1
             elif isinstance(sub, ast.Attribute):
                 found[f"Attribute.{ast.unparse(sub)}"] += 1
             elif isinstance(sub, ast.Subscript):
