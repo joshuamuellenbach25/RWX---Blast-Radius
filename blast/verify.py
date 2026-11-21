@@ -64,6 +64,14 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
     from blast import runner
 
     runner.quiet_stdout()
+    # The scorer may hand us a stderr pipe that nobody reads, or a closed one:
+    # a test's output would then block or kill the worker and every child
+    # before any result is written. Their output goes nowhere unless asked.
+    if not os.environ.get("BLAST_WORKER_STDERR"):
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
     os.chdir("/sqlglot")
     if "/sqlglot" not in sys.path:
         sys.path.insert(0, "/sqlglot")
