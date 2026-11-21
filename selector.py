@@ -92,10 +92,13 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
 
     kept: set[int] = set()
     candidates: set[int] = set()
+    edited: set[int] = set()  # tests reached by edits to test files
     pairs, required, modules = [], [], set()
     verifiable = True
     for verdict in analysis.files:
         tests = runtime(verdict.tests)
+        if verdict.kind == "test_function":
+            edited |= tests
         if verdict.kind in VERIFIED_KINDS:
             candidates |= tests
             for change in verdict.swaps:
@@ -116,6 +119,10 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     # A local run cannot vouch for a test that starts its own process, so such
     # a candidate is always listed, whatever the local run shows.
     kept |= {n for n in candidates if by_number[n]["id"] in SUBPROCESS_TESTS}
+    # Q3 lists the slow tests only when a cheap test fails, for patches to
+    # library code. A slow test whose own test code the patch edits is listed:
+    # the cheap tests say nothing about its new assertions.
+    kept |= {n for n in candidates & edited if by_number[n]["seconds"] >= SLOW_SECONDS}
     candidates -= kept
     slow = {n for n in candidates if by_number[n]["seconds"] >= SLOW_SECONDS}
     cheap = candidates - slow

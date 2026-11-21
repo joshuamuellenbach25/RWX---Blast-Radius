@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -310,10 +311,56 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int
     return tests, "; ".join(notes)
 
 
+def _insertion_points(patch) -> set[int]:
+    """Old line numbers before which the patch only adds lines (a run of
+    added lines with no removed line in it)."""
+    points: set[int] = set()
+    for hunk in patch.hunks:
+        old_line = hunk.old_start
+        start, removed, added = old_line, False, False
+        for line in [*hunk.lines, " "]:  # the sentinel closes the last run
+            tag = line[:1]
+            if tag == "\\":
+                continue
+            if tag in "-+":
+                if not (removed or added):
+                    start = old_line
+                if tag == "-":
+                    removed = True
+                    old_line += 1
+                else:
+                    added = True
+                continue
+            if added and not removed:
+                points.add(start)
+            removed = added = False
+            old_line += 1
+    return points
+
+
+def _entry_lines(tree: ast.AST, first_line: int) -> list[int]:
+    """The first executed statement of the function starting at first_line
+    (its def line, or its first decorator's): every call runs it."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        starts = [node.lineno, *(d.lineno for d in node.decorator_list)]
+        if first_line not in starts:
+            continue
+        body = node.body
+        if len(body) > 1 and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                and isinstance(body[0].value.value, str):
+            body = body[1:]
+        return [body[0].lineno]
+    return []
+
+
 def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int, str, bool]:
     if not changes:
         return 0, "", False
     changed_lines = patch.changed_old_lines()
+    insertions = _insertion_points(patch)
+    tree = None
     own_lines: set[int] = set()
     fallback = 0
     for change in changes:
@@ -327,6 +374,14 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         own = {line for _, _, line in change.old.co_lines() if line is not None} - nested
         if own:
             own_lines.update(range(min(own), max(own) + 1))
+        # Lines inserted into a function run on whatever path reaches their
+        # spot, which the neighboring lines' tests can miss (an insertion
+        # after an error branch is reached by every normal call). Such a
+        # change also lists every test that called the function.
+        if own and any(min(own) <= point <= max(own) + 1 for point in insertions):
+            if tree is None:
+                tree = ast.parse(old_text)
+            fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno))
         # A lambda that shares its line with code run at import is invisible
         # to the map: import-time lines are left out of every test, and a
         # factory such as rename_func records only the few tests that reached
@@ -347,5 +402,5 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         (path, change.old.co_qualname, change.old.co_firstlineno) in coverage.import_code
         for change in changes
     )
-    note = f"spans {spans}" + ("; import-line lambda fallback" if fallback else "")
+    note = f"spans {spans}" + ("; lambda or insertion fallback" if fallback else "")
     return coverage.tests_covering(path, span_lines) | fallback, note, runs_at_import
