@@ -747,6 +747,7 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
         # Names this body has bound so far, in source order: a class body
         # also sees the module's names bound before the class statement.
         bound: set[str] = set()
+        new_body_binds = {name for node in new_body for name in _binds(node)}
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             olds, news = old_body[i1:i2], new_body[j1:j2]
             if tag == "equal":
@@ -792,8 +793,10 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             # A value the module or class no longer assigns (Tokenizer.QUOTES
             # deleted) fails its import-time readers, such as a metaclass
             # building tables, and import-time lines are not in the map.
-            still_bound = {name for node in news for name, _ in _bound_names(node)}
-            removed = sorted(old_kinds.keys() - still_bound)
+            # Bound with a value anywhere in the new body: a statement moved
+            # past its neighbor is not a removal, and an annotation left
+            # without its value (QUOTES: T) binds nothing.
+            removed = sorted(old_kinds.keys() - new_body_binds)
             if removed:
                 found.append(Binding(owner, f"<removed {', '.join(removed)}>", "class-call" if owner else "import-risk"))
             old_shapes, new_shapes = _element_shapes(olds), _element_shapes(news)
