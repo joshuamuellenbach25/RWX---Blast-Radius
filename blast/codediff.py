@@ -416,6 +416,11 @@ def _operations(nodes: list) -> Counter:
                 # A new container can be unhashable where a key or set member
                 # was ([TokenType.BEGIN] in a set raises TypeError).
                 found[type(sub).__name__] += 1
+            elif isinstance(sub, ast.Constant):
+                # A constant of a new type where another operand stood (a list
+                # plus 1) raises TypeError; a changed value of the same type
+                # adds nothing here.
+                found[f"Constant.{type(sub.value).__name__}"] += 1
             elif isinstance(sub, ast.Attribute):
                 found[f"Attribute.{ast.unparse(sub)}"] += 1
             elif isinstance(sub, ast.Subscript):
@@ -423,6 +428,14 @@ def _operations(nodes: list) -> Counter:
                 found[f"Subscript.{ast.unparse(sub)}"] += 1
             pending.extend(ast.iter_child_nodes(sub))
     return found
+
+
+def _binds(node: ast.stmt) -> set[str]:
+    """Names a statement binds when it runs: an annotation with no value
+    binds nothing."""
+    if isinstance(node, ast.AnnAssign) and node.value is None:
+        return set()
+    return {name for name, _ in _bound_names(node)}
 
 
 def _value_kinds(nodes: list) -> dict[str, str]:
@@ -469,7 +482,7 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                     if isinstance(old_node, ast.ClassDef):
                         seen = module_bound if owner else bound
                         found.extend(compare(old_node.body, new_node.body, owner + (old_node.name,), set(seen)))
-                    bound.update(name for name, _ in _bound_names(new_node))
+                    bound.update(_binds(new_node))
                 continue
             for node in news:
                 # A changed statement that reads an unbound name raises at
@@ -477,7 +490,7 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 missing = _unbound_load(node, bound | module_bound)
                 if missing:
                     found.append(Binding(owner, f"<unbound {missing}>", "class-call" if owner else "import-risk"))
-                bound.update(name for name, _ in _bound_names(node))
+                bound.update(_binds(node))
             # An operation the old statements did not run (1 / 0, a new
             # subscript or attribute) can raise at import the same way.
             added_operations = _operations(news) - _operations(olds)

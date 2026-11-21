@@ -383,17 +383,11 @@ def _files_loading(source_root: Path, path: str) -> set[str]:
 
 
 def _top_level_names(source_root: Path, path: str) -> set[str]:
-    """Classes, functions and other names the pristine module binds at top
-    level."""
+    """Classes and functions the pristine module defines at top level. Shared
+    constant names (EXPRESSION_METADATA in every typing module) would pull in
+    the readers of other modules' values, so constants stay out."""
     tree = parse_cached((source_root / path).read_text("utf-8"))
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            names.add(node.name)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names.update(target.id for target in targets if isinstance(target, ast.Name))
-    return names
+    return {node.name for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
 def _module_name(path: str) -> str:
