@@ -1,6 +1,6 @@
 # Status
 
-Updated 2026-11-21 03:38 EST (practice board read between 03:06 and 03:09). Open review items: a subscript assignment target that reads an unbound name, and annotations evaluated at import in sqlglot/trie.py, which lacks the future import. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
+Updated 2026-11-21 03:56 EST (practice board read between 03:06 and 03:09). The two review items open at 03:38 are fixed in 56a5838. Next practice slot, 04:01 EST: diagnostic 8a38db0, which reruns the first failing test of up to two failed runs on unpatched code. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
 
 | Measure | Seconds |
 |---|---|
