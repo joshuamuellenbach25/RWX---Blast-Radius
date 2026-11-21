@@ -190,6 +190,61 @@ def analyze(patch_text: str, source_root: Path, coverage: CoverageMap) -> Commit
     return CommitAnalysis(verdicts)
 
 
+def _star_names(source_root: Path, text: str) -> set[str] | None:
+    """The names a module's star imports bind, from the pinned source: every
+    public module-level name of each sqlglot module it star-imports (none
+    sets __all__). None when one cannot be read there."""
+    if "import *" not in text:
+        return None
+    try:
+        tree = parse_cached(text)
+    except SyntaxError:
+        return None
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            exported = _module_exports(source_root, node.module or "", node.level, 0) if node in tree.body else None
+            if exported is None:
+                return None
+            names |= exported
+    return names
+
+
+def _module_exports(source_root: Path, module: str, level: int, depth: int) -> set[str] | None:
+    """Every name a star import of this module binds: its module-level names
+    that do not start with an underscore, those it star-imports included.
+    None for a relative import, a module outside sqlglot, one that sets
+    __all__, or one that cannot be read."""
+    if level or depth > 4 or not (module == "sqlglot" or module.startswith("sqlglot.")):
+        return None
+    base = source_root / module.replace(".", "/")
+    path = base.with_suffix(".py") if base.with_suffix(".py").is_file() else base / "__init__.py"
+    try:
+        tree = parse_cached(path.read_text("utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return None
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
+            inner = _module_exports(source_root, node.module or "", node.level, depth + 1)
+            if inner is None:
+                return None
+            names |= inner
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                names.add(sub.id)
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(sub.name)
+            elif isinstance(sub, ast.Import):
+                names |= {alias.asname or alias.name.partition(".")[0] for alias in sub.names}
+            elif isinstance(sub, ast.ImportFrom):
+                names |= {alias.asname or alias.name for alias in sub.names if alias.name != "*"}
+    if "__all__" in names:
+        return None
+    return {name for name in names if not name.startswith("_")}
+
+
 def _strip_unknown_prefix(patch: FilePatch, top: set[str]) -> bool:
     """Strips a path prefix other than a/ and b/ (old/ and new/, say): a
     first folder the pinned checkout lacks in front of one it has. False
@@ -283,7 +338,7 @@ def analyze_python(
     if runs_at_import or diff.unmatched:
         return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
     try:
-        bindings = changed_bindings(old_text, new_text)
+        bindings = changed_bindings(old_text, new_text, _star_names(source_root, new_text))
     except SyntaxError as error:
         return FileVerdict(path, "module", everything, f"cannot compare statements: {error}", new_text=new_text)
     tests, notes = _binding_candidates(path, bindings, coverage, source_root)

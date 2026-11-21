@@ -368,6 +368,8 @@ DUNDER = re.compile(r"__\w+__")
 # and return annotations, and a module or class level x: T = v evaluates T.
 # Set by changed_bindings for the module it compares.
 _ANNOTATIONS_RUN = False
+# The names the compared module's star imports bind (None: not known).
+_STAR_NAMES: set[str] | None = None
 
 
 def _lazy_annotations(tree: ast.Module) -> bool:
@@ -540,8 +542,12 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
     bound yet, so running it raises NameError. Lambda bodies run later. A
     compound statement is read through its header and each branch; a branch
     starts from the names bound before it (None: no claim)."""
-    if "*" in bound:  # a star import binds names no statement shows
-        return None
+    if "*" in bound:
+        # A star import binds names no statement shows: those of the modules
+        # it reads, when the analysis could list them.
+        if _STAR_NAMES is None:
+            return None
+        bound = (bound - {"*"}) | _STAR_NAMES
     if isinstance(node, (ast.If, ast.While)):
         # A branch that cannot run (if TYPE_CHECKING:) reads nothing.
         return _unbound_in([node.test], bound) or next(
@@ -781,9 +787,10 @@ def _element_shapes(nodes: list) -> dict[str, set[str]]:
     return shapes
 
 
-def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
+def changed_bindings(old_text: str, new_text: str, star_names: set[str] | None = None) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
-    Function bodies are left out: bytecode comparison covers them."""
+    Function bodies are left out: bytecode comparison covers them.
+    star_names: the names the module's star imports bind, when known."""
     import difflib
 
     def compare(old_body: list, new_body: list, owner: tuple[str, ...], module_bound: set[str]) -> list[Binding]:
@@ -894,14 +901,16 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
         return found
 
-    global _ANNOTATIONS_RUN
+    global _ANNOTATIONS_RUN, _STAR_NAMES
     old_tree, new_tree = parse_cached(old_text), ast.parse(new_text)
     old_lazy, new_lazy = _lazy_annotations(old_tree), _lazy_annotations(new_tree)
     _ANNOTATIONS_RUN = not new_lazy
+    _STAR_NAMES = star_names
     try:
         found = compare(old_tree.body, new_tree.body, (), set())
     finally:
         _ANNOTATIONS_RUN = False
+        _STAR_NAMES = None
     # Dropping the future import makes every annotation in the module run.
     if old_lazy and not new_lazy:
         found.append(Binding((), "<annotations evaluated>", "import-risk"))
