@@ -182,6 +182,10 @@ def main() -> None:
         if null != 2:
             os.dup2(null, 2)
             os.close(null)
+    if sys.stderr is None:  # descriptor 2 was closed when Python started
+        # The worker flushes sys.stdout, set to sys.stderr below; None would
+        # kill it before any test ran.
+        sys.stderr = open(2, "w", encoding="utf-8", errors="replace", closefd=False)
     answer_fd = os.dup(1)
     # Anything printed by accident lands on stderr, never among the answers.
     os.dup2(2, 1)

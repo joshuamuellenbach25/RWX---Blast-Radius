@@ -417,31 +417,33 @@ def _insertion_points(patch) -> set[int]:
     points: set[int] = set()
     for hunk in patch.hunks:
         old_line = hunk.old_start
-        start, removed, added = old_line, False, False
+        start, in_run, removed, added = old_line, False, False, False
         removed_indent = added_indent = None
         for line in [*hunk.lines, " "]:  # the sentinel closes the last run
             tag = line[:1]
             if tag == "\\":
                 continue
             if tag in "-+":
-                if not (removed or added):
-                    start = old_line
+                if not in_run:
+                    start, in_run = old_line, True
+                # Blank and comment lines run nothing: a blank line replaced
+                # by a statement is an insertion.
                 text = line[1:]
-                indent = len(text) - len(text.lstrip(" \t")) if text.strip() else None
+                code = text.strip() and not text.strip().startswith("#")
+                indent = len(text) - len(text.lstrip(" \t")) if code else None
                 if tag == "-":
-                    removed = True
                     old_line += 1
                     if indent is not None:
+                        removed = True
                         removed_indent = indent if removed_indent is None else min(removed_indent, indent)
-                else:
+                elif indent is not None:
                     added = True
-                    if indent is not None:
-                        added_indent = indent if added_indent is None else min(added_indent, indent)
+                    added_indent = indent if added_indent is None else min(added_indent, indent)
                 continue
             dedented = removed_indent is not None and added_indent is not None and added_indent < removed_indent
             if added and (not removed or dedented):
                 points.add(start)
-            removed = added = False
+            in_run = removed = added = False
             removed_indent = added_indent = None
             old_line += 1
     return points
