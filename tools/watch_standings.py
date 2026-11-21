@@ -34,7 +34,10 @@ def summarize(board: dict, team: str | None, margin: float) -> dict:
     others = [row for row in rows if row["team"] != team]
     leader = min(others, key=lambda row: (row["score"], row["at"])) if others else None
     own = next((row for row in rows if row["team"] == team), None) if team else None
-    target = round(leader["score"] - margin, 3) if leader else None
+    # The target moves with the board: the best other team's score, less a
+    # lead of `margin` (a fraction of that score when below 1).
+    lead = leader["score"] * margin if leader and margin < 1 else margin
+    target = round(leader["score"] - lead, 3) if leader else None
     return {
         "leader_team": leader["team"] if leader else None,
         "leader_score": leader["score"] if leader else None,

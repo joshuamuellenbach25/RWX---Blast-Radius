@@ -9,6 +9,11 @@ from pathlib import Path
 from blast.codediff import changed_bindings, diff_python, enclosing_spans, statement_spans
 from blast.patch import FilePatch, PatchError, apply_file_patch, parse_patch
 
+# tests/test_typing.py compares the bytecode of the annotators defined in
+# sqlglot/typing/ without running them, so line coverage never names it.
+INSPECTED_PREFIX = "sqlglot/typing/"
+INSPECTING_TEST_FILE = "tests/test_typing.py"
+
 # Files pytest itself reads before any test runs: a change can alter every test.
 RUNNER_CONFIG = {
     "pyproject.toml", "setup.cfg", "setup.py", "tox.ini", "pytest.ini",
@@ -100,6 +105,14 @@ class CoverageMap:
             index = per_file.get(line)
             if index is not None:
                 mask |= self.mask(index)
+        return mask
+
+    def tests_in_test_file(self, test_file: str) -> int:
+        """Every test defined in the given test file (tests/....py)."""
+        mask = 0
+        for number, test_id in enumerate(self.test_ids):
+            if test_id.startswith(test_file + "::"):
+                mask |= 1 << number
         return mask
 
     def tests_touching_file(self, filename: str) -> int:
@@ -203,6 +216,10 @@ def analyze_python(
     function_tests, function_note, runs_at_import = _function_candidates(
         path, old_text, patch, function_changes, coverage
     )
+    if path.startswith(INSPECTED_PREFIX):
+        # test_typing compares the bytecode of these modules' annotators
+        # without running them, so line coverage never names it.
+        function_tests |= coverage.tests_in_test_file(INSPECTING_TEST_FILE)
     if diff.function_level_only:
         if runs_at_import:
             return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
