@@ -89,6 +89,19 @@ def parse_patch(text: str) -> list[FilePatch]:
             patches.append(current)
             index += 1
             continue
+        # A plain unified diff starts each file with a ---/+++ pair and no
+        # git header: after a file's hunks such a pair opens the next file,
+        # where it would otherwise rename the file just read.
+        if (
+            line.startswith("--- ")
+            and index + 1 < len(lines)
+            and lines[index + 1].startswith("+++ ")
+            and (current is None or current.hunks)
+        ):
+            current = FilePatch(old_path=_strip_prefix(line[4:]), new_path=_strip_prefix(lines[index + 1][4:]))
+            patches.append(current)
+            index += 2
+            continue
         if current is None:
             index += 1
             continue
