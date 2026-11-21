@@ -137,14 +137,16 @@ def _dependency_order(sources: list) -> list:
     return ordered
 
 
-def _import_failure(sources: list, root: str = "/sqlglot") -> str:
+def _import_failure(sources: list, root: str = "/sqlglot") -> str | None:
     """The changed modules, when their new bodies raise together where their
     old bodies ran clean, each run as an import would (a metaclass reading a
     table built with an empty key raises IndexError at import, which no
     static reading shows); "" otherwise. All of a commit's changed modules
-    run together, so one that reads a name another adds sees it. Old bodies
-    that do not run clean again are no evidence either way; new bodies that
-    do not finish where the old ones did are named too, as no answer."""
+    run together, so one that reads a name another adds sees it. None when
+    the old bodies do not run clean again: this check then proves nothing,
+    and the caller imports the patched text in a fresh interpreter instead.
+    New bodies that do not finish where the old ones did are named too, as
+    no answer."""
     olds, news = [], []
     for name, path, new_text in _dependency_order(sources):
         filename = os.path.join(root, path)
@@ -154,8 +156,10 @@ def _import_failure(sources: list, root: str = "/sqlglot") -> str:
         except OSError:
             return ""
         news.append((name, filename, new_text))
-    if not news or _bodies_run(olds) != 0:
+    if not news:
         return ""
+    if _bodies_run(olds) != 0:
+        return None
     outcome = _bodies_run(news)
     if outcome == 0:
         return ""
@@ -170,6 +174,8 @@ def _run_job(job: Job, index) -> dict:
     from blast import runner
 
     failure = _import_failure(job.sources)
+    if failure is None:
+        _exec_fresh(job)  # never returns
     if failure:
         return {"commit": job.commit, "ok": True, "import_failed": failure, "failed": [], "summary": {}}
     if not job.tests:
