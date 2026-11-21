@@ -32,6 +32,31 @@ SLOW_SECONDS = 2.5
 # patched code, so a run here proves nothing about them.
 SUBPROCESS_TESTS = {"tests/dialects/test_dialect.py::TestDialect::test_lazy_load"}
 VERIFIED_KINDS = {"function", "test_function"}
+# A local run pays when its CPU stays under this share of what a clean run
+# saves: about half the sample's verified commits break nothing.
+RUN_SHARE = 0.5
+# CPU of one class setup, by test class: TestExecutor loads the TPC-H and
+# TPC-DS tables, TestOptimizer opens a DuckDB database.
+CLASS_SETUP_MS = {
+    "tests/test_executor.py::TestExecutor": 2000,
+    "tests/test_optimizer.py::TestOptimizer": 500,
+}
+DEFAULT_CLASS_SETUP_MS = 50
+
+
+def _duration_ms(test: dict) -> int:
+    return math.floor(test["seconds"] * 1000 + 0.5)
+
+
+def _cost_ms(numbers: set[int], by_number: dict) -> int:
+    cost, _ = pack(sorted(numbers), {n: _duration_ms(by_number[n]) for n in numbers})
+    return cost
+
+
+def _run_cost_ms(numbers: set[int], by_number: dict) -> int:
+    classes = {by_number[n]["id"].rsplit("::", 1)[0] for n in numbers}
+    setups = sum(CLASS_SETUP_MS.get(name, DEFAULT_CLASS_SETUP_MS) for name in classes)
+    return setups + sum(_duration_ms(by_number[n]) for n in numbers)
 
 
 def time_budget(commit_count: int) -> float:
@@ -74,6 +99,12 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     cheap = candidates - slow
     if not cheap:
         return kept | slow, set(), set()
+    # Run only when it pays: a clean run saves what listing the candidates
+    # would cost, a failing run saves nothing, and every run costs about the
+    # recorded seconds of its tests plus their class setups in CPU.
+    saving_ms = _cost_ms(kept | cheap | slow, by_number) - _cost_ms(kept, by_number)
+    if _run_cost_ms(cheap, by_number) > RUN_SHARE * saving_ms:
+        return kept | cheap | slow, set(), set()
     run = [by_number[n] for n in sorted(cheap)]
     modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
     jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules))
