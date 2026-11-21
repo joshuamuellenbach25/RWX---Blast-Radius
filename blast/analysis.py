@@ -197,7 +197,7 @@ def _star_names(source_root: Path, text: str) -> set[str] | None:
     if "import *" not in text:
         return None
     try:
-        tree = parse_cached(text)
+        tree = ast.parse(text)  # patched text: not kept in the cache of pristine trees
     except SyntaxError:
         return None
     names: set[str] = set()
@@ -231,18 +231,35 @@ def _module_exports(source_root: Path, module: str, level: int, depth: int) -> s
                 return None
             names |= inner
             continue
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
-                names.add(sub.id)
-            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                names.add(sub.name)
-            elif isinstance(sub, ast.Import):
-                names |= {alias.asname or alias.name.partition(".")[0] for alias in sub.names}
-            elif isinstance(sub, ast.ImportFrom):
-                names |= {alias.asname or alias.name for alias in sub.names if alias.name != "*"}
+        names |= _module_scope_names(node)
     if "__all__" in names:
         return None
     return {name for name in names if not name.startswith("_")}
+
+
+def _module_scope_names(statement: ast.stmt) -> set[str]:
+    """The names a module-level statement binds in the module itself: a def
+    or class binds its name, not what its body binds (arg_types inside a
+    class is no module name), and a lambda or comprehension binds nothing."""
+    names: set[str] = set()
+    pending: list[ast.AST] = [statement]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            continue
+        if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node, ast.Import):
+            names |= {alias.asname or alias.name.partition(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            names |= {alias.asname or alias.name for alias in node.names if alias.name != "*"}
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        pending.extend(ast.iter_child_nodes(node))
+    return names
 
 
 def _strip_unknown_prefix(patch: FilePatch, top: set[str]) -> bool:
