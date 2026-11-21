@@ -823,11 +823,26 @@ def _entry_lines(tree: ast.AST, first_line: int) -> list[int]:
     return []
 
 
+def _added_new_lines(patch) -> set[int]:
+    """New-side line numbers of the lines the patch adds."""
+    added: set[int] = set()
+    for hunk in patch.hunks:
+        new_line = hunk.new_start
+        for line in hunk.lines:
+            tag = line[:1]
+            if tag == "+":
+                added.add(new_line)
+            if tag in " +":
+                new_line += 1
+    return added
+
+
 def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int, str, bool]:
     if not changes:
         return 0, "", False
     changed_lines = patch.changed_old_lines()
     insertions = _insertion_points(patch, _inert_old_lines(patch, old_text))
+    added_new = _added_new_lines(patch)
     tree = None
     own_lines: set[int] = set()
     fallback = 0
@@ -857,7 +872,19 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
             or change.old.co_kwonlyargcount != change.new.co_kwonlyargcount
             or (new_locals - old_locals) & set(change.old.co_names)
         )
-        if own and (reshaped or any(min(own) <= point <= max(own) + 1 for point in insertions)):
+        # Lines added to this function where none of its old lines changed
+        # (after its last statement and a blank line, say) sit outside its
+        # old lines, so no insertion point above falls in them.
+        new_nested = {
+            line
+            for const in change.new.co_consts
+            if hasattr(const, "co_lines")
+            for _, _, line in const.co_lines()
+            if line is not None
+        }
+        new_own = {line for _, _, line in change.new.co_lines() if line is not None} - new_nested
+        appended = bool(new_own & added_new) and not (changed_lines & own)
+        if own and (reshaped or appended or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
                 tree = parse_cached(old_text)
             fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno))
