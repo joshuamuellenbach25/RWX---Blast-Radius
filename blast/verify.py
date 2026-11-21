@@ -81,7 +81,7 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
     for module in sorted({name for job in jobs for name in job.modules}):
         try:
             importlib.import_module(module)
-        except Exception as error:  # the child reports the tests of a broken module as failed
+        except BaseException as error:  # SystemExit too: the child reports the module's tests as failed
             print(f"warm import {module} failed: {error!r}", file=sys.stderr, flush=True)
     index = runner.function_index()
     # Children inherit this heap. Frozen objects are skipped by the children's
@@ -100,7 +100,11 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             # Sized from recorded time, so a hang in setUpClass or in C code
             # (where no test timer can act) ends after a bounded spend.
             budget = min(remaining, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests))
-            child = os.fork()
+            try:
+                child = os.fork()
+            except OSError as error:  # this commit keeps every candidate; try the next
+                print(f"{job.commit}: fork failed {error!r}", file=sys.stderr, flush=True)
+                continue
             if child == 0:
                 _child_main(job, index)
             running[child] = (job, time.monotonic(), budget)
