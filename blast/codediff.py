@@ -416,6 +416,26 @@ def _operations(nodes: list) -> Counter:
     return found
 
 
+def _value_kinds(nodes: list) -> dict[str, str]:
+    """name -> the kind of value a simple assignment gives it: the syntax
+    node's type, and for a constant the constant's own type."""
+    kinds: dict[str, str] = {}
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        kind = type(value).__name__
+        if isinstance(value, ast.Constant):
+            kind += f".{type(value.value).__name__}"
+        for target in targets:
+            if isinstance(target, ast.Name):
+                kinds[target.id] = kind
+    return kinds
+
+
 def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
     Function bodies are left out: bytecode comparison covers them."""
@@ -451,6 +471,12 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             if added_operations:
                 label = ", ".join(sorted(added_operations))
                 found.append(Binding(owner, f"<new {label}>", "class-call" if owner else "import-risk"))
+            # A value whose kind changes (a dict made None) can break the code
+            # that reads it at import, such as a metaclass building tables.
+            old_kinds, new_kinds = _value_kinds(olds), _value_kinds(news)
+            retyped = sorted(name for name in old_kinds.keys() & new_kinds.keys() if old_kinds[name] != new_kinds[name])
+            if retyped:
+                found.append(Binding(owner, f"<new kind of value {', '.join(retyped)}>", "class-call" if owner else "import-risk"))
             old_names = {}
             for node in olds:
                 for name, kind in _bound_names(node):
