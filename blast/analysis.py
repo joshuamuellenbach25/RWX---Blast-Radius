@@ -301,6 +301,7 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         return 0, "", False
     changed_lines = patch.changed_old_lines()
     own_lines: set[int] = set()
+    fallback = 0
     for change in changes:
         nested = {
             line
@@ -312,6 +313,16 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         own = {line for _, _, line in change.old.co_lines() if line is not None} - nested
         if own:
             own_lines.update(range(min(own), max(own) + 1))
+        # A one-line lambda shares its line with the statement that built it
+        # at import, and the map leaves import-time lines out of every test,
+        # so no test is recorded for it. List the tests that create its class,
+        # or every test when it belongs to no class.
+        if own and not coverage.tests_covering(path, own) and coverage.executed_at_import(path, own):
+            owner = change.old.co_qualname.split(".<", 1)[0]
+            creators = 0
+            if owner and "<" not in owner and owner != change.old.co_qualname:
+                creators = coverage.tests_creating(f"{_module_name(path)}:{owner}")
+            fallback |= creators or coverage.all_tests
     relevant = (changed_lines & own_lines) or changed_lines
     spans = enclosing_spans(statement_spans(old_text), relevant)
     span_lines = {line for first, last in spans for line in range(first, last + 1)}
@@ -321,4 +332,5 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         (path, change.old.co_qualname, change.old.co_firstlineno) in coverage.import_code
         for change in changes
     )
-    return coverage.tests_covering(path, span_lines), f"spans {spans}", runs_at_import
+    note = f"spans {spans}" + ("; import-line lambda fallback" if fallback else "")
+    return coverage.tests_covering(path, span_lines) | fallback, note, runs_at_import
