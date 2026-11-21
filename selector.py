@@ -112,7 +112,8 @@ CHILD_PROCESS_NAMES = {
 # files on disk, never from the patch (a comment it adds is not there).
 FILE_READ_NAMES = {
     "open", "open_code", "read_text", "read_bytes", "getsource", "getsourcelines", "findsource",
-    "getline", "getlines", "detect_encoding",
+    "getline", "getlines", "detect_encoding", "get_data", "read_binary", "open_text", "open_binary",
+    "resource_string", "resource_stream",
 }
 
 

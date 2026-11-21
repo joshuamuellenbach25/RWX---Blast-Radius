@@ -924,11 +924,12 @@ def changed_bindings(old_text: str, new_text: str, star_names: set[str] | None =
     return found
 
 
-def statement_spans(source: str) -> list[tuple[int, int]]:
+def statement_spans(source: str, tree: ast.AST | None = None) -> list[tuple[int, int]]:
     """(first, last) line of every statement; for a compound statement only
-    its header, since its body statements are listed on their own."""
+    its header, since its body statements are listed on their own. A caller
+    with a parse it does not want kept (a patched text) passes it as tree."""
     spans: list[tuple[int, int]] = []
-    for node in ast.walk(parse_cached(source)):
+    for node in ast.walk(tree if tree is not None else parse_cached(source)):
         if isinstance(node, ast.Lambda):
             # A lambda body runs when the lambda is called, not where the
             # statement holding it runs, so it is its own unit.
@@ -943,7 +944,13 @@ def statement_spans(source: str) -> list[tuple[int, int]]:
             if isinstance(getattr(node, name, None), list) and getattr(node, name)
         ]
         if bodies:
-            first_child = min(child.lineno for body in bodies for child in body)
+            # A match statement's cases carry no line of their own; their
+            # patterns do.
+            first_child = min(
+                (child.pattern if isinstance(child, ast.match_case) else child).lineno
+                for body in bodies
+                for child in body
+            )
             last = max(node.lineno, first_child - 1)
         spans.append((node.lineno, last))
     return spans

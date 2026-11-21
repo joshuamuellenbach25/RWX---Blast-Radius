@@ -765,7 +765,7 @@ def _class_qualnames(text: str) -> set[str]:
             else:
                 visit(child, prefix)
 
-    visit(parse_cached(text), "")
+    visit(ast.parse(text), "")  # a patched text: its parse is not kept
     return names
 
 
@@ -1117,18 +1117,24 @@ def _function_candidates(path, old_text, new_text, patch, changes, coverage) -> 
             tree = parse_cached(old_text)
         end = _function_end(tree, change.old.co_firstlineno) or max(own, default=0)
         position = _new_position(patch, end)
+        added_own = new_own & added_new
         # A replaced last statement that now wraps over more lines ends where
-        # its new statement ends.
-        if new_spans is None:
-            new_spans = statement_spans(new_text)
-        holding = [span for span in new_spans if span[0] <= position <= span[1]]
-        if holding:
-            position = min(holding, key=lambda span: span[1] - span[0])[1]
-        appended = bool(own) and max(new_own & added_new, default=0) > position
+        # its new statement ends. The patched text is parsed only when an
+        # added line lies past the old end, and the parse is not kept.
+        if added_own and max(added_own) > position:
+            if new_spans is None:
+                new_spans = statement_spans(new_text, ast.parse(new_text))
+            holding = [span for span in new_spans if span[0] <= position <= span[1]]
+            if holding:
+                position = min(holding, key=lambda span: span[1] - span[0])[1]
+        appended = bool(own) and max(added_own, default=0) > position
         if own and (reshaped or appended or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
                 tree = parse_cached(old_text)
-            fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno, own))
+            # The whole line table: a line the function shares with a nested
+            # generator (`if not any(... for ...)`) still runs on every call.
+            every_line = {line for _, _, line in change.old.co_lines() if line is not None}
+            fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno, every_line))
         # A lambda that shares its line with code run at import is invisible
         # to the map: import-time lines are left out of every test, and a
         # factory such as rename_func records only the few tests that reached
