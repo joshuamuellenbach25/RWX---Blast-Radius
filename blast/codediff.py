@@ -676,6 +676,11 @@ def _operations(nodes: list) -> Counter:
                         found["DictUnpack"] += 1
                     elif isinstance(member, UNHASHABLE):
                         found["Unhashable"] += 1
+            elif isinstance(sub, ast.FormattedValue):
+                # Formatting raises when the value's type refuses the spec or
+                # the conversion (f"{1:q}" is a ValueError at import).
+                spec = ast.unparse(sub.format_spec) if sub.format_spec is not None else ""
+                found[f"Format.{_kind(sub.value)}.{sub.conversion}.{spec}"] += 1
             elif isinstance(sub, ast.Starred):
                 found["Starred"] += 1
             elif isinstance(sub, ast.comprehension):
