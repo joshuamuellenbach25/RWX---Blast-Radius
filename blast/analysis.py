@@ -39,6 +39,8 @@ _IMPORT_LINE = re.compile(r"^[ \t]*(?:from[ \t]+([A-Za-z_]\w*)|import[ \t]+([^\n
 # What may follow a module's name in its file name (duckdb.backup.py is no
 # module duckdb): this interpreter's suffixes, plus plain extensions.
 _MODULE_SUFFIXES = frozenset(importlib.machinery.all_suffixes()) | {".so", ".pyd"}
+# File names pytest may read as configuration in any folder it starts from.
+_RUNNER_NAMES = {path.rpartition("/")[2] for path in RUNNER_CONFIG} | {"conftest.py"}
 _checkout_imports: dict[Path, set[str]] = {}
 
 
@@ -434,7 +436,16 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
     if not patch.hunks and patch.old_path == patch.new_path:
         return FileVerdict(path, "same", 0, "mode change only")
     if patch.old_path is None or patch.new_path is None or patch.old_path != patch.new_path:
-        if inside:
+        # Test data (no module, no runner file) is read by name, and no test
+        # lists a fixture folder: a deleted or renamed one breaks the tests
+        # that opened it, and a new one is read only by tests the patch edits.
+        test_data = all(
+            candidate.startswith("tests/")
+            and not candidate.endswith(tuple(_MODULE_SUFFIXES))
+            and candidate.rpartition("/")[2] not in _RUNNER_NAMES
+            for candidate in patch.paths
+        )
+        if inside and not test_data:
             return FileVerdict(path, "unknown", everything, "file added, deleted or renamed")
         return FileVerdict(path, "moved" if moved else "fixture", readers, "read file added, deleted or renamed")
 
