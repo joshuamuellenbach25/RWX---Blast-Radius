@@ -111,7 +111,10 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
             kept |= tests
             if verdict.kind == "module":
                 verifiable = False
-    if (kept or candidates) and unknown_tests:
+    # Tests the map does not know can break on any change that reaches tests.
+    # Decided from the map's own verdicts, so a tests.json whose ids the map
+    # never matches still lists them instead of answering nothing.
+    if unknown_tests and any(verdict.tests for verdict in analysis.files):
         kept |= set(unknown_tests)
     candidates -= kept
     if not verifiable:
