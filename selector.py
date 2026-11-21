@@ -162,24 +162,47 @@ def _report_stage(stage: int, job_count: int, result_count: int, commit_count: i
     log(f"verification stage {stage}: {job_count} jobs, {result_count} results, {commit_count} commits")
 
 
-def _add_fleet_signal(answered, failed_ms, unrun_ms, duration_ms) -> None:
+def _large_reason(analysis) -> int:
+    """Diagnostic: why a commit lists nearly every test, from the first
+    verdict that lists at least 1000: 1 a file added, deleted or renamed in
+    the package or the tests, 2 changed code that runs at import, 3 another
+    module verdict or no single verdict that large, 4 another unknown
+    verdict. 0 is left for commits never analyzed."""
+    for verdict in analysis.files:
+        if verdict.tests.bit_count() < 1000:
+            continue
+        if verdict.kind == "unknown":
+            return 1 if verdict.note.startswith("file added") else 4
+        if verdict.kind == "module":
+            return 2 if verdict.note == "changed code runs at import" else 3
+    return 3
+
+
+def _add_fleet_signal(answered, large, duration_ms) -> None:
     """Temporary practice-board diagnostic. The board shows only totals, to
-    the millisecond per run, so 16f + u tests recorded at 1 ms go on the
-    busiest worker of the first commit that lists any test: f is the board
-    seconds of the commits whose local run failed and u those of the
-    commits with no local run, each in 16 s units and at most 15. At most
-    255 ms, and no test that can fail is left out."""
-    code = 16 * min(round(failed_ms / 16000), 15) + min(round(unrun_ms / 16000), 15)
+    the millisecond per run, so tests whose recorded milliseconds add up to
+    the code go on the busiest worker of the first commit that lists any
+    test. The code holds six counts of 2 bits each (at most 3): commits
+    listing at least 1000 tests never analyzed, then by reason 1 to 4 (see
+    _large_reason), then commits with no local run listing 100 to 999
+    tests. At most 4095 ms, and no test that can fail is left out."""
+    code = sum(min(count, 3) << (2 * index) for index, count in enumerate(large))
     for commit, workers in answered:
         if not workers:
             continue
         listed = {number for worker in workers for number in worker}
-        tiny = [number for number in sorted(duration_ms) if duration_ms[number] == 1 and number not in listed][:code]
-        if len(tiny) < code:
+        remaining, extra = code, []
+        for number in sorted(duration_ms, key=lambda n: (-duration_ms[n], n)):
+            if number not in listed and 0 < duration_ms[number] <= remaining:
+                extra.append(number)
+                remaining -= duration_ms[number]
+                if not remaining:
+                    break
+        if remaining:
             return
         busiest = max(workers, key=lambda worker: sum(duration_ms[number] for number in worker))
-        busiest.extend(tiny)
-        log(f"fleet signal {code} ms on {commit}: {failed_ms / 1000:.1f} s on failed runs, {unrun_ms / 1000:.1f} s on commits not run")
+        busiest.extend(extra)
+        log(f"fleet signal {code} ms on {commit}: large lists by reason {large}")
         return
 
 
@@ -243,6 +266,7 @@ def main() -> None:
     plans: dict[str, tuple[set[int], set[int], set[int]]] = {}
     jobs: list[Job] = []
     notes: dict[str, str] = {}
+    reasons: dict[str, int] = {}  # diagnostic: why a commit lists nearly every test
     # Analysis stops at 40% of the run limit: a batch of huge patches must
     # still answer in time, the rest listing every test.
     analysis_end = started + time_budget(len(commits)) * 2 / 3
@@ -261,6 +285,7 @@ def main() -> None:
             text = (DATA / "commits" / f"{commit}.patch").read_bytes().decode("utf-8")
             analysis = analyze(text, SOURCE_ROOT, coverage)
             notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
+            reasons[commit] = _large_reason(analysis)
             plans[commit] = plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit)
         except Exception as error:  # an unreadable commit runs every test
             log(f"{commit}: analysis failed, running every test: {error!r}")
@@ -279,6 +304,7 @@ def main() -> None:
 
     answered: list[tuple[str, list[list[int]]]] = []
     failed_ms = unrun_ms = 0  # diagnostic: board seconds by kind of commit
+    large = [0] * 6  # diagnostic: commits with large lists, see _add_fleet_signal
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
@@ -306,10 +332,14 @@ def main() -> None:
             failed_ms += cost
         elif category == "unrun":
             unrun_ms += cost
+        if len(ordered) >= 1000:
+            large[reasons.get(commit, 0)] += 1
+        elif category == "unrun" and len(ordered) >= 100:
+            large[5] += 1
         answered.append((commit, workers))
         log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
 
-    _add_fleet_signal(answered, failed_ms, unrun_ms, duration_ms)
+    _add_fleet_signal(answered, large, duration_ms)
     lines = [json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")) for commit, workers in answered]
     payload = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
     # A buffered file keeps writing until every byte is out, where a single
