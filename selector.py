@@ -147,17 +147,9 @@ def log(message: str) -> None:
 
 
 def _report_stage(stage: int, job_count: int, result_count: int, commit_count: int) -> None:
-    """Temporary practice-board diagnostic: the scorer shows only CPU seconds,
-    so spend a set amount of CPU per verification stage (10 s no jobs, 30 s
-    verify raised, 50 s no results, 0 s results) plus 0.5 s per job."""
-    log(f"verification stage {stage}: {job_count} jobs, {result_count} results")
-    seconds = {0: 10.0, 1: 30.0, 2: 50.0, 3: 0.0}[stage] + 0.5 * min(job_count, 19)
-    # The final batch holds about 60 commits: never spend CPU there.
-    if stage == 3 or commit_count > 45:
-        return
-    end = time.process_time() + seconds
-    while time.process_time() < end:
-        pass
+    """Log how far verification got (0 no jobs, 1 verify raised, 2 no
+    results, 3 results). It spends no CPU: a scored run must never pay for it."""
+    log(f"verification stage {stage}: {job_count} jobs, {result_count} results, {commit_count} commits")
 
 
 def bits(mask: int) -> list[int]:
