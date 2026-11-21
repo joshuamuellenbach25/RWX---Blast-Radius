@@ -53,10 +53,9 @@ def _imported_names(source_root: Path) -> set[str]:
         names = set()
         for folder in ("sqlglot", "tests"):
             for file in (source_root / folder).rglob("*.py"):
-                try:
-                    text = file.read_text("utf-8", errors="replace")
-                except OSError:
-                    continue
+                # A file that cannot be read raises: skipping it would keep a
+                # set without its imports for the rest of the run.
+                text = file.read_text("utf-8", errors="replace")
                 for match in _IMPORT_LINE.finditer(text):
                     if match.group(1):
                         names.add(match.group(1))
@@ -666,10 +665,9 @@ def _test_texts(source_root: Path) -> list[tuple[str, str]]:
     if source_root not in _test_texts_cache:
         texts = []
         for file in sorted((source_root / "tests").rglob("*.py")):
-            try:
-                text = file.read_text("utf-8", errors="replace")
-            except OSError:
-                continue
+            # A file that cannot be read raises, so the commit lists every
+            # test; skipping it would keep its readers out of every lookup.
+            text = file.read_text("utf-8", errors="replace")
             texts.append((file.relative_to(source_root).as_posix(), text.replace("\r\n", "\n").replace("\r", "\n")))
         _test_texts_cache[source_root] = texts
     return _test_texts_cache[source_root]
