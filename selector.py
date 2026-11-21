@@ -37,6 +37,9 @@ VERIFIED_KINDS = {"function", "test_function"}
 # A local run pays when its CPU stays under this share of what a clean run
 # saves: about half the sample's verified commits break nothing.
 RUN_SHARE = 0.5
+# CPU of a fresh interpreter's start and package import (blast.fresh), measured
+# at 0.8 to 1.0 s under Linux for a run of three to seven quick tests.
+FRESH_START_MS = 1000
 # CPU of one class setup, by test class: TestExecutor loads the TPC-H and
 # TPC-DS tables, TestOptimizer opens a DuckDB database.
 CLASS_SETUP_MS = {
@@ -110,6 +113,16 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     edited: set[int] = set()  # tests reached by edits to test files
     pairs, required, modules = [], [], set()
     verifiable = True
+    # Module-level code in the package cannot be swapped in: a fresh
+    # interpreter that loads every changed file's patched text runs the
+    # candidates instead (blast.fresh), when every changed file has one.
+    sources = [
+        (verdict.path[: -len(".py")].replace("/", ".").removesuffix(".__init__"), verdict.path, verdict.new_text)
+        for verdict in analysis.files
+        if verdict.path.endswith(".py") and verdict.kind != "same" and verdict.new_text is not None
+    ]
+    changed_python = [v for v in analysis.files if v.path.endswith(".py") and v.kind != "same"]
+    fresh = False
     for verdict in analysis.files:
         tests = runtime(verdict.tests)
         if verdict.kind == "test_function":
@@ -122,6 +135,9 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
                     required.append(change.old)
             module = verdict.path[: -len(".py")].replace("/", ".")
             modules.add(module[: -len(".__init__")] if module.endswith(".__init__") else module)
+        elif verdict.kind == "module" and verdict.path.startswith("sqlglot/") and len(sources) == len(changed_python):
+            candidates |= tests
+            fresh = True
         else:
             kept |= tests
             if verdict.kind in ("module", "moved"):
@@ -138,26 +154,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         kept |= set(unknown_tests)
     candidates -= kept
     if not verifiable:
-        # A changed module body can raise at import where no static reading
-        # shows it (a metaclass indexing a table key made ""): the worker runs
-        # the old and the new bodies of every changed package module
-        # together, so one that reads a name another adds sees it, and a new
-        # failure lists every test. Without every new text there is no check.
-        package_changes = [
-            verdict for verdict in analysis.files
-            if verdict.path.startswith("sqlglot/") and verdict.path.endswith(".py") and verdict.kind != "same"
-        ]
-        sources = [
-            (verdict.path[: -len(".py")].replace("/", ".").removesuffix(".__init__"), verdict.path, verdict.new_text)
-            for verdict in package_changes
-            if verdict.new_text is not None
-        ]
-        if (
-            any(verdict.kind == "module" for verdict in package_changes)
-            and len(sources) == len(package_changes)
-            and len(kept | candidates) < len(by_number)
-        ):
-            jobs.append(Job(commit=commit, tests=[], sources=sources, modules={name for name, _, _ in sources}, value=float("inf")))
+        _add_import_check(analysis, kept | candidates, by_number, jobs, commit)
         return kept | candidates, set(), set()
     # A local run cannot vouch for a test that starts its own process, so such
     # a candidate is always listed, whatever the local run shows.
@@ -170,6 +167,8 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     slow = {n for n in candidates if by_number[n]["seconds"] >= SLOW_SECONDS}
     cheap = candidates - slow
     if not cheap:
+        if fresh:
+            _add_import_check(analysis, kept | slow, by_number, jobs, commit)
         return kept | slow, set(), set()
     # Run only when it pays: a clean run saves what listing the candidates
     # would cost, a failing run saves nothing, and every run costs about the
@@ -187,16 +186,44 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     best, best_margin = None, 0.0
     for plan_kept, plan_run, plan_slow in plans:
         saving_ms = listed_ms - _cost_ms(plan_kept, by_number)
-        margin = RUN_SHARE * saving_ms - _run_cost_ms(plan_run, by_number)
+        margin = RUN_SHARE * saving_ms - _run_cost_ms(plan_run, by_number) - (FRESH_START_MS if fresh else 0)
         if margin >= best_margin:
             best, best_margin = (plan_kept, plan_run, plan_slow), margin
     if best is None:
+        if fresh:
+            _add_import_check(analysis, kept | cheap | slow, by_number, jobs, commit)
         return kept | cheap | slow, set(), set()
     kept, cheap, slow = best
     run = run_order(cheap, by_number)
     modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
-    jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules, value=best_margin))
+    jobs.append(Job(
+        commit=commit, tests=run, pairs=pairs, required=required, modules=modules, value=best_margin,
+        sources=sources if fresh else [], fresh=fresh,
+    ))
     return kept, cheap, slow
+
+
+def _add_import_check(analysis, listed, by_number, jobs, commit) -> None:
+    """A changed module body can raise at import where no static reading
+    shows it (a metaclass indexing a table key made ""): the worker runs the
+    old and the new bodies of every changed package module together, so one
+    that reads a name another adds sees it, and a new failure lists every
+    test. Without every new text, or with every test listed, no check."""
+    package_changes = [
+        verdict for verdict in analysis.files
+        if verdict.path.startswith("sqlglot/") and verdict.path.endswith(".py") and verdict.kind != "same"
+    ]
+    sources = [
+        (verdict.path[: -len(".py")].replace("/", ".").removesuffix(".__init__"), verdict.path, verdict.new_text)
+        for verdict in package_changes
+        if verdict.new_text is not None
+    ]
+    if (
+        any(verdict.kind == "module" for verdict in package_changes)
+        and len(sources) == len(package_changes)
+        and len(listed) < len(by_number)
+    ):
+        jobs.append(Job(commit=commit, tests=[], sources=sources, modules={name for name, _, _ in sources}, value=float("inf")))
 
 DATA = Path(os.environ.get("BLAST_DATA", "/data"))
 SOURCE_ROOT = Path(os.environ.get("BLAST_SOURCE", "/sqlglot"))

@@ -38,6 +38,29 @@ class Job:
     # (module name, path under the source root, new text): each body runs as
     # an import would before any test, see _import_failure.
     sources: list = field(default_factory=list)
+    # Run the tests in a fresh interpreter that loads every source's patched
+    # text (blast.fresh), for changes a function swap cannot apply.
+    fresh: bool = False
+
+
+def _exec_fresh(job: Job) -> None:
+    """Replaces this forked child with a fresh interpreter running the job
+    (blast.fresh); the worker waits on it like any child. Never returns."""
+    spec = RESULTS / f"{job.commit}.spec.json"
+    spec.write_text(
+        json.dumps({
+            "commit": job.commit,
+            "sources": job.sources,
+            "tests": job.tests,
+            "limits": {str(test["number"]): _limit(test) for test in job.tests},
+            "root": os.getcwd(),
+            "result": str(RESULTS / f"{job.commit}.json"),
+        }),
+        "utf-8",
+    )
+    app = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    bootstrap = f"import sys; sys.path.insert(0, {app!r}); from blast import fresh; fresh.main(sys.argv[1])"
+    os.execv(sys.executable, [sys.executable, "-c", bootstrap, str(spec)])
 
 
 def _limit(test: dict) -> float:
@@ -248,6 +271,8 @@ def _child_main(job: Job, index) -> None:
                 handle.write("1000")
         except OSError as error:
             print(f"{job.commit}: oom_score_adj not set: {error!r}", file=sys.stderr, flush=True)
+        if job.fresh:
+            _exec_fresh(job)
         result = _run_job(job, index)
         target = RESULTS / f"{job.commit}.json"
         temporary = target.with_suffix(".tmp")
