@@ -116,7 +116,12 @@ MAP_PATH = APP / "data" / "map.json"
 
 
 def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    """Logs are best effort: a closed or full stderr must never stop the
+    answers from reaching stdout."""
+    try:
+        print(message, file=sys.stderr, flush=True)
+    except OSError:
+        pass
 
 
 def bits(mask: int) -> list[int]:
@@ -207,7 +212,10 @@ def main() -> None:
         log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
 
     payload = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
-    os.write(answer_fd, payload)
+    # A buffered file keeps writing until every byte is out, where a single
+    # os.write may stop short and cut a line.
+    with os.fdopen(answer_fd, "wb") as answers:
+        answers.write(payload)
     log(f"{len(commits)} commits answered in {time.monotonic() - started:.2f} s")
 
 
