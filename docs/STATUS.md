@@ -1,12 +1,12 @@
 # Status
 
-Updated 2026-11-21 04:25 EST. Diagnostic BB-6D152AEF (04:02 EST, 256.2 s) showed no load errors and failing tests that pass on unpatched code: the practice commits break the tests the local runs check. Next practice slot, 05:02 EST: diagnostic a73870d, which splits the board seconds between commits whose local run failed and commits with no local run. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
+Updated 2026-11-21 04:52 EST. Main 1752c54 carries every reproduced fix from the code reviews through cfa81ba; the 30 sample plans are unchanged. Diagnostic BB-6D152AEF (04:02 EST, 256.2 s) showed no load errors and failing tests that pass on unpatched code: the practice commits break the tests the local runs check. Next practice slot, 05:02 EST: diagnostic a73870d, which splits the board seconds between commits whose local run failed and commits with no local run. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
 
 | Measure | Seconds |
 |---|---|
 | Our best practice score | 256.0 |
-| Best score on the practice board | 138.1 |
-| Our target (that score minus 10%) | 124.29 |
+| Best score on the practice board | 131.5 |
+| Our target (that score minus 10%) | 118.35 |
 | Local run of 304103a on the 30 sample commits (scorer flags) | 148.3 |
 | Main on the 30 sample commits, sample answers as the oracle (estimate) | 130.7 |
 
