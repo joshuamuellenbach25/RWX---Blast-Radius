@@ -162,22 +162,14 @@ def _report_stage(stage: int, job_count: int, result_count: int, commit_count: i
     log(f"verification stage {stage}: {job_count} jobs, {result_count} results, {commit_count} commits")
 
 
-def _add_fleet_signal(answered, jobs, results, duration_ms) -> None:
+def _add_fleet_signal(answered, failed_ms, unrun_ms, duration_ms) -> None:
     """Temporary practice-board diagnostic. The board shows only totals, to
-    the millisecond per run, so 16a + 4e + b tests recorded at 1 ms go on
-    the busiest worker of the first commit that lists any test. Among the
-    patched runs that came back, a counts those where a test could not be
-    loaded and e those with any other failing test (each at most 3). b
-    counts the baselines, the first failing test of up to two failed runs
-    run again on unpatched code, that failed there too (3 when none came
-    back). At most 63 ms, and no test that can fail is left out."""
-    real = [r for name, r in results.items() if not name.endswith("~base")]
-    base = [r for name, r in results.items() if name.endswith("~base") and r.get("ok")]
-    ran = [result for result in real if result.get("ok")]
-    loader = [r for r in ran if r.get("summary", {}).get("load_errors")]
-    errors = [r for r in ran if not r.get("summary", {}).get("load_errors") and r.get("failed")]
-    failures = [r for r in base if r.get("failed")]
-    code = 16 * min(len(loader), 3) + 4 * min(len(errors), 3) + (min(len(failures), 2) if base else 3)
+    the millisecond per run, so 16f + u tests recorded at 1 ms go on the
+    busiest worker of the first commit that lists any test: f is the board
+    seconds of the commits whose local run failed and u those of the
+    commits with no local run, each in 16 s units and at most 15. At most
+    255 ms, and no test that can fail is left out."""
+    code = 16 * min(round(failed_ms / 16000), 15) + min(round(unrun_ms / 16000), 15)
     for commit, workers in answered:
         if not workers:
             continue
@@ -187,7 +179,7 @@ def _add_fleet_signal(answered, jobs, results, duration_ms) -> None:
             return
         busiest = max(workers, key=lambda worker: sum(duration_ms[number] for number in worker))
         busiest.extend(tiny)
-        log(f"fleet signal {code} ms on {commit}: {len(jobs)} jobs, {len(ran)} ran, {len(loader)} load errors, {len(errors)} failing runs, {len(base)} baselines, {len(failures)} failed")
+        log(f"fleet signal {code} ms on {commit}: {failed_ms / 1000:.1f} s on failed runs, {unrun_ms / 1000:.1f} s on commits not run")
         return
 
 
@@ -286,9 +278,11 @@ def main() -> None:
     _report_stage(stage, len(jobs), len(results), len(commits))
 
     answered: list[tuple[str, list[list[int]]]] = []
+    failed_ms = unrun_ms = 0  # diagnostic: board seconds by kind of commit
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
+        category = "other"
         if cheap and result and result.get("ok"):
             failed = set(result["failed"]) & cheap
             complete = bool(result.get("summary", {}).get("complete"))
@@ -296,6 +290,7 @@ def main() -> None:
                 # A run that stopped at its first failure left tests unrun,
                 # so every candidate is listed.
                 chosen = kept | (failed if complete else cheap) | slow
+                category = "failed"
             elif complete:
                 chosen = kept
             else:
@@ -304,12 +299,17 @@ def main() -> None:
         else:
             chosen = kept | cheap | slow
             how = "not run" if not cheap else f"no result {result.get('reason') if result else ''}"
+            category = "unrun"
         ordered = sorted(chosen)
         cost, workers = pack(ordered, duration_ms)
+        if category == "failed":
+            failed_ms += cost
+        elif category == "unrun":
+            unrun_ms += cost
         answered.append((commit, workers))
         log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
 
-    _add_fleet_signal(answered, jobs, results, duration_ms)
+    _add_fleet_signal(answered, failed_ms, unrun_ms, duration_ms)
     lines = [json.dumps({"commit": commit, "workers": workers}, separators=(",", ":")) for commit, workers in answered]
     payload = ("\n".join(lines) + "\n").encode("utf-8") if lines else b""
     # A buffered file keeps writing until every byte is out, where a single

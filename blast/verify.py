@@ -90,7 +90,6 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
     print(f"warm worker ready in {time.monotonic() - started:.1f} s, {len(index)} functions", file=sys.stderr, flush=True)
     pending = list(jobs)
     running: dict[int, tuple[Job, float, float]] = {}  # pid -> (job, start, budget)
-    baselines = 0
     while pending or running:
         while pending and len(running) < PARALLEL_CHILDREN:
             job = pending.pop(0)
@@ -117,19 +116,6 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
                 del running[child]
                 cpu = usage.ru_utime + usage.ru_stime
                 print(f"{job.commit}: child done in {time.monotonic() - child_started:.1f} s, {cpu:.2f} s CPU", file=sys.stderr, flush=True)
-                # Diagnostic: the first failing test of up to two failed runs
-                # runs once more on unpatched code. Failing there too shows a
-                # fault of this environment rather than of the commit.
-                if baselines < 2 and not job.commit.endswith("~base"):
-                    try:
-                        done = json.loads((RESULTS / f"{job.commit}.json").read_text("utf-8"))
-                    except (OSError, ValueError):
-                        done = {}
-                    first = min(done["failed"]) if done.get("ok") and done.get("failed") else None
-                    test = next((t for t in job.tests if t["number"] == first), None)
-                    if test is not None:
-                        baselines += 1
-                        pending.append(Job(commit=f"{job.commit}~base", tests=[test], pairs=[], required=[], modules=job.modules))
             elif time.monotonic() - child_started > budget:
                 os.kill(child, signal.SIGKILL)
                 os.waitpid(child, 0)
