@@ -102,7 +102,13 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             # timer can act) ends; at least 90 s, because the recorded seconds
             # leave out class setup: 2haz used 27 s of CPU for 9 s recorded
             # and a loaded run killed it at 10 s + 3x recorded = 38 s.
-            budget = min(remaining, max(90.0, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests)))
+            # A few seconds stay for every job still queued, so two stalled
+            # setups cannot hold both slots until the deadline.
+            budget = min(
+                remaining,
+                max(10.0, remaining - 3.0 * len(pending)),
+                max(90.0, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests)),
+            )
             try:
                 child = os.fork()
             except OSError as error:  # this commit keeps every candidate; try the next
