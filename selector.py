@@ -102,6 +102,23 @@ def time_budget(commit_count: int) -> float:
     return 0.6 * limit
 
 
+# Names a test uses to start another interpreter, which loads the files on
+# disk rather than the patched code a local run swaps in.
+CHILD_PROCESS_NAMES = {
+    "subprocess", "Popen", "check_output", "check_call", "executable", "system", "popen",
+    "spawnv", "spawnl", "spawnve", "execv", "execl", "execve", "multiprocessing", "get_context",
+}
+
+
+def _code_names(code) -> set[str]:
+    """The names a code object and the code nested in it use."""
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if hasattr(const, "co_names"):
+            names |= _code_names(const)
+    return names
+
+
 def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     """(tests kept without running, cheap tests to run, slow tests) in the
     runtime numbering; adds a Job when some tests can be run here."""
@@ -127,6 +144,10 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         tests = runtime(verdict.tests)
         if verdict.kind == "test_function":
             edited |= tests
+            # A local run patches this process only: an edited test that
+            # starts another interpreter checks the files on disk there.
+            if any(_code_names(change.new) & CHILD_PROCESS_NAMES for change in verdict.swaps):
+                kept |= tests
         if verdict.kind in VERIFIED_KINDS:
             candidates |= tests
             for change in verdict.swaps:

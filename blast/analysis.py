@@ -911,6 +911,39 @@ def _added_new_lines(patch) -> set[int]:
     return added
 
 
+def _new_position(patch, old_line: int) -> int:
+    """Where an old line sits in the new file: its new number when the patch
+    keeps it, the spot it was taken from when the patch removes it."""
+    offset = 0
+    for hunk in patch.hunks:
+        # A count of 0 makes the start name the line before the hunk.
+        old = hunk.old_start + (hunk.old_count == 0)
+        new = hunk.new_start + (hunk.new_count == 0)
+        if old_line < old:
+            break
+        for line in hunk.lines:
+            tag = line[:1]
+            if tag in " -":
+                if old == old_line:
+                    return new
+                old += 1
+            if tag in " +":
+                new += 1
+        offset = new - old
+    return old_line + offset
+
+
+def _function_end(tree: ast.AST, first_line: int) -> int | None:
+    """The last line of the function starting at first_line (its def line,
+    or its first decorator's)."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and first_line in (
+            node.lineno, *(d.lineno for d in node.decorator_list)
+        ):
+            return node.end_lineno
+    return None
+
+
 def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int, str, bool]:
     if not changes:
         return 0, "", False
@@ -957,7 +990,14 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
             if line is not None
         }
         new_own = {line for _, _, line in change.new.co_lines() if line is not None} - new_nested
-        appended = bool(new_own & added_new) and not (changed_lines & own)
+        # Judged by position, so another edit in the same function (a message
+        # reworded) cannot hide a statement appended after its last line: an
+        # added line of the new function past where the old function's last
+        # line now sits. A replaced last line sits where its old one did.
+        if tree is None:
+            tree = parse_cached(old_text)
+        end = _function_end(tree, change.old.co_firstlineno) or max(own, default=0)
+        appended = bool(own) and max(new_own & added_new, default=0) > _new_position(patch, end)
         if own and (reshaped or appended or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
                 tree = parse_cached(old_text)
