@@ -124,7 +124,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
             modules.add(module[: -len(".__init__")] if module.endswith(".__init__") else module)
         else:
             kept |= tests
-            if verdict.kind == "module":
+            if verdict.kind in ("module", "moved"):
                 verifiable = False
     # A local run sees the files on disk, not the patch's data files: a test
     # the patch edits may now read a changed file (a README, a fixture) that

@@ -193,8 +193,13 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
         readers |= coverage.opens.get(candidate, 0)
     if path.startswith("sqlglotc/"):
         readers |= coverage.tests_touching_file("tests/test_sqlglotc.py")
+    # A deleted or renamed file stays in place for a local run, so a commit
+    # with one cannot be checked by running its tests here.
+    moved = patch.old_path is not None and patch.new_path != patch.old_path
     if not inside and not readers and not path.startswith("sqlglotc/"):
         # No test imports, runs or opens this file.
+        if moved:
+            return FileVerdict(path, "moved", 0, "unread file deleted or renamed")
         return FileVerdict(path, "other", 0, "file no test reads")
     if patch.binary:
         return FileVerdict(path, "unknown", everything, "binary patch")
@@ -203,7 +208,7 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
     if patch.old_path is None or patch.new_path is None or patch.old_path != patch.new_path:
         if inside:
             return FileVerdict(path, "unknown", everything, "file added, deleted or renamed")
-        return FileVerdict(path, "fixture", readers, "read file added, deleted or renamed")
+        return FileVerdict(path, "moved" if moved else "fixture", readers, "read file added, deleted or renamed")
 
     old_file = source_root / path
     try:
