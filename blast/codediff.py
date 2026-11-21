@@ -370,11 +370,12 @@ def _target_names(target: ast.AST | None) -> set[str]:
 
 def _never_runs(test: ast.expr) -> bool:
     """An if test that is false when the code runs: a false constant or
-    TYPE_CHECKING, which only type checkers set."""
+    TYPE_CHECKING read from the typing module (t, as sqlglot imports it),
+    which only type checkers set. str.TYPE_CHECKING raises instead."""
     if isinstance(test, ast.Constant):
         return not test.value
     if isinstance(test, ast.Attribute):
-        return test.attr == "TYPE_CHECKING"
+        return test.attr == "TYPE_CHECKING" and isinstance(test.value, ast.Name) and test.value.id in ("t", "typing")
     return isinstance(test, ast.Name) and test.id == "TYPE_CHECKING"
 
 
@@ -393,6 +394,17 @@ def _branches(node: ast.stmt) -> list[list]:
         return [node.body, node.orelse]
     if isinstance(node, (ast.With, ast.AsyncWith)):
         return [node.body]
+    return []
+
+
+def _store_targets(node: ast.stmt) -> list:
+    """The targets a statement assigns by unpacking or binding."""
+    if isinstance(node, ast.Assign):
+        return list(node.targets)
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        return [node.target]
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        return [item.optional_vars for item in node.items if item.optional_vars is not None]
     return []
 
 
@@ -541,6 +553,13 @@ def _operations(nodes: list) -> Counter:
                 found += _operations(branch)
         else:
             continue
+        # A target that unpacks raises when the value has another length or
+        # cannot be iterated (pretty, = False).
+        for target in _store_targets(node):
+            for sub in ast.walk(target):
+                if isinstance(sub, (ast.Tuple, ast.List)):
+                    starred = any(isinstance(element, ast.Starred) for element in sub.elts)
+                    found[f"Unpack{'*' if starred else len(sub.elts)}"] += 1
         pending = list(parts)
         while pending:
             sub = pending.pop()
