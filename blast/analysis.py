@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import re
 from dataclasses import dataclass, field
@@ -98,6 +99,16 @@ class CoverageMap:
             seen.add(key)
             mask |= self.classes.get(key, 0)
             stack.extend(self._children.get(key, []))
+        return mask
+
+    def tests_creating_module(self, module: str) -> int:
+        """Tests that created an object of any class the module defines: a
+        module that fails to import takes all of its classes with it."""
+        prefix = f"{module}:"
+        mask = 0
+        for key in self.classes._indexes:
+            if key.startswith(prefix):
+                mask |= self.tests_creating(key)
         return mask
 
     def tests_covering(self, filename: str, lines) -> int:
@@ -269,9 +280,15 @@ def _loaded_on_demand(path: str) -> bool:
     return path.startswith(ON_DEMAND_PREFIXES) and path not in LOADED_WITH_SQLGLOT and not path.endswith("/__init__.py")
 
 
+_module_file_cache: dict[tuple[Path, str], list[str]] = {}
+
+
 def _module_files(source_root: Path, module: str) -> list[str]:
     """The files that importing `module` runs: each package's __init__.py on
     the way down, then the module itself."""
+    cached = _module_file_cache.get((source_root, module))
+    if cached is not None:
+        return cached
     parts = module.split(".")
     files = []
     for depth in range(1, len(parts) + 1):
@@ -280,6 +297,7 @@ def _module_files(source_root: Path, module: str) -> list[str]:
             if (source_root / candidate).is_file():
                 files.append(candidate)
                 break
+    _module_file_cache[(source_root, module)] = files
     return files
 
 
@@ -309,32 +327,35 @@ def _test_files_loading(source_root: Path, path: str) -> list[str]:
     tests/dialects/test_dialect.py, which imports five dialects; the executor
     imports the Python generator). If `path` raises on import, every test in
     these files fails."""
+    return sorted(rel for rel in _files_loading(source_root, path) if rel.startswith("tests/"))
+
+
+def _files_loading(source_root: Path, path: str) -> set[str]:
+    """Every sqlglot and test file that runs `path` while it loads, through
+    any chain of top-level imports, `path` included: if `path` raises on
+    import, each of them fails to load too."""
     graph = _import_graphs.get(source_root)
     if graph is None:
         tests_dir = source_root / "tests"
         if not tests_dir.is_dir():
             raise FileNotFoundError(f"no test folder at {tests_dir}")
         graph = {}
-        pending = [file.relative_to(source_root).as_posix() for file in sorted(tests_dir.rglob("*.py"))]
-        while pending:
-            rel = pending.pop()
-            if rel not in graph:
+        for folder in ("sqlglot", "tests"):
+            for file in sorted((source_root / folder).rglob("*.py")):
+                rel = file.relative_to(source_root).as_posix()
                 graph[rel] = _top_level_imports(source_root, rel)
-                pending.extend(graph[rel] - graph.keys())
         _import_graphs[source_root] = graph
-    loading = []
-    for test_file in graph:
-        if not test_file.startswith("tests/"):
-            continue
-        seen, stack = set(), [test_file]
-        while stack:
-            current = stack.pop()
-            if current not in seen:
-                seen.add(current)
-                stack.extend(graph.get(current, ()))
-        if path in seen:
-            loading.append(test_file)
-    return loading
+    importers: dict[str, set[str]] = {}
+    for rel, imports in graph.items():
+        for target in imports:
+            importers.setdefault(target, set()).add(rel)
+    seen, stack = {path}, [path]
+    while stack:
+        for parent in importers.get(stack.pop(), ()):
+            if parent not in seen:
+                seen.add(parent)
+                stack.append(parent)
+    return seen
 
 
 def _module_name(path: str) -> str:
@@ -356,23 +377,31 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
             return everything, f"unreadable statement near {'.'.join(binding.owner) or 'module'}"
         if binding.kind == "call":
             return everything, "a changed module-level statement calls code at import"
-        if binding.kind == "class-call":
-            # A class-body call that raises at import breaks every test that
-            # loads this file. A core module loads with sqlglot itself, so
-            # that is every test. A dialect part or a test module loads on
-            # demand: the tests that create the class (a dialect module holds
-            # little runtime code of its own), the ones that ran the file's
-            # code, and every test in a test file that imports it as it loads.
+        if binding.kind in ("class-call", "import-risk"):
+            # A changed statement that can raise at import (a class-body call,
+            # an unbound name, a new operation such as 1 / 0) breaks every test
+            # that loads this file. A core module loads with sqlglot itself,
+            # so that is every test. A dialect part or a test module loads on
+            # demand: the tests that create any class it defines (a dialect
+            # module holds little runtime code of its own), the ones that ran
+            # its code, and every test in a test file that imports it.
+            where = ".".join(binding.owner) or "module level"
+            what = "class-body call" if binding.name == "<call>" else binding.name
             if not (_loaded_on_demand(path) or path.startswith("tests/")):
-                return everything, f"{'.'.join(binding.owner)}: class-body call in a module sqlglot imports"
-            loaders = coverage.tests_creating(f"{module}:{'.'.join(binding.owner)}")
-            loaders |= coverage.tests_touching_file(path)
-            for test_file in _test_files_loading(source_root, path):
-                loaders |= coverage.tests_in_test_file(test_file)
+                return everything, f"{where}: {what} in a module sqlglot imports"
+            # Every module that imports this one fails to load with it: the
+            # tests that create any of their classes, and every test of the
+            # test files among them.
+            loaders = coverage.tests_touching_file(path)
+            for rel in _files_loading(source_root, path):
+                if rel.startswith("tests/"):
+                    loaders |= coverage.tests_in_test_file(rel)
+                else:
+                    loaders |= coverage.tests_creating_module(_module_name(rel))
             if not loaders:
-                return everything, f"{'.'.join(binding.owner)}: class-body call, no test known to load it"
+                return everything, f"{where}: {what}, no test known to load it"
             tests |= loaders
-            notes.append(f"{'.'.join(binding.owner)}: class-body call, all creators and file tests")
+            notes.append(f"{where}: {what}, all creators and file tests")
             continue
         if binding.kind == "import":
             # An import's effect is the module it loads (dialect classes
@@ -417,6 +446,13 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
 
 
 _LITERAL_START = re.compile(r"""^[rRbBuUfF]{0,2}['"]""")
+_BRANCH = re.compile(r"elif\b|else\s*:")
+# Flags that change what a call returns or accepts: a return made a yield
+# turns the function into a generator, and every caller gets one.
+RESHAPING_FLAGS = (
+    inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+    | inspect.CO_ITERABLE_COROUTINE | inspect.CO_VARARGS | inspect.CO_VARKEYWORDS
+)
 
 
 def _inert_old_lines(patch, old_text: str) -> set[int]:
@@ -446,6 +482,7 @@ def _insertion_points(patch, inert: set[int] | frozenset[int] = frozenset()) -> 
         old_line = hunk.old_start
         start, in_run, removed, added = old_line, False, False, False
         removed_indent = added_indent = None
+        removed_branches = added_branches = 0
         for line in [*hunk.lines, " "]:  # the sentinel closes the last run
             tag = line[:1]
             if tag == "\\":
@@ -458,20 +495,27 @@ def _insertion_points(patch, inert: set[int] | frozenset[int] = frozenset()) -> 
                 text = line[1:]
                 code = text.strip() and not text.strip().startswith("#")
                 indent = len(text) - len(text.lstrip(" \t")) if code else None
+                branch = bool(indent is not None and _BRANCH.match(text.strip()))
                 if tag == "-":
                     if indent is not None and old_line not in inert:
                         removed = True
                         removed_indent = indent if removed_indent is None else min(removed_indent, indent)
+                        removed_branches += branch
                     old_line += 1
                 elif indent is not None:
                     added = True
                     added_indent = indent if added_indent is None else min(added_indent, indent)
+                    added_branches += branch
                 continue
             dedented = removed_indent is not None and added_indent is not None and added_indent < removed_indent
-            if added and (not removed or dedented):
+            # An elif made an if (or an else removed) now runs on the paths
+            # the branches before it took, which its old line never saw.
+            unchained = added_branches < removed_branches
+            if added and (not removed or dedented or unchained):
                 points.add(start)
             in_run = removed = added = False
             removed_indent = added_indent = None
+            removed_branches = added_branches = 0
             old_line += 1
     return points
 
@@ -516,7 +560,13 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         # spot, which the neighboring lines' tests can miss (an insertion
         # after an error branch is reached by every normal call). Such a
         # change also lists every test that called the function.
-        if own and any(min(own) <= point <= max(own) + 1 for point in insertions):
+        reshaped = (
+            (change.old.co_flags ^ change.new.co_flags) & RESHAPING_FLAGS
+            or change.old.co_argcount != change.new.co_argcount
+            or change.old.co_posonlyargcount != change.new.co_posonlyargcount
+            or change.old.co_kwonlyargcount != change.new.co_kwonlyargcount
+        )
+        if own and (reshaped or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
                 tree = ast.parse(old_text)
             fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno))

@@ -14,6 +14,7 @@ import builtins
 import dis
 import inspect
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from types import CodeType
 
@@ -362,6 +363,32 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
     return None
 
 
+def _operations(nodes: list) -> Counter:
+    """Operations that can raise, in what simple statements evaluate at
+    import (lambda bodies run later; compound statements are not read)."""
+    found: Counter = Counter()
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+        elif isinstance(node, ast.ClassDef):
+            parts = [*node.bases, *node.keywords, *node.decorator_list]
+        elif isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
+            parts = [node.value] if node.value is not None else []
+        else:
+            continue
+        pending = list(parts)
+        while pending:
+            sub = pending.pop()
+            if isinstance(sub, ast.Lambda):
+                continue
+            if isinstance(sub, (ast.BinOp, ast.UnaryOp)):
+                found[f"{type(sub).__name__}.{type(sub.op).__name__}"] += 1
+            elif isinstance(sub, (ast.Subscript, ast.Attribute)):
+                found[type(sub).__name__] += 1
+            pending.extend(ast.iter_child_nodes(sub))
+    return found
+
+
 def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
     Function bodies are left out: bytecode comparison covers them."""
@@ -389,8 +416,14 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 # import, like a call that raises: the module fails to load.
                 missing = _unbound_load(node, bound | module_bound)
                 if missing:
-                    found.append(Binding(owner, f"<unbound {missing}>", "class-call" if owner else "call"))
+                    found.append(Binding(owner, f"<unbound {missing}>", "class-call" if owner else "import-risk"))
                 bound.update(name for name, _ in _bound_names(node))
+            # An operation the old statements did not run (1 / 0, a new
+            # subscript or attribute) can raise at import the same way.
+            added_operations = _operations(news) - _operations(olds)
+            if added_operations:
+                label = ", ".join(sorted(added_operations))
+                found.append(Binding(owner, f"<new {label}>", "class-call" if owner else "import-risk"))
             old_names = {}
             for node in olds:
                 for name, kind in _bound_names(node):
