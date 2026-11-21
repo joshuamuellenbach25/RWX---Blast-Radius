@@ -731,10 +731,14 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 found.append(Binding(owner, f"<new kind of value {', '.join(retyped)}>", "class-call" if owner else "import-risk"))
             # An element of a new kind in an existing container (1 put in a
             # list of pairs) breaks code that unpacks it at import, such as a
-            # tokenizer building its tables. More elements of the kinds
-            # already there do not count.
+            # tokenizer building its tables, and so does emptying it (QUOTES
+            # made []). More elements of the kinds already there do not count.
             old_shapes, new_shapes = _element_shapes(olds), _element_shapes(news)
-            regrown = sorted(name for name in old_shapes.keys() & new_shapes.keys() if new_shapes[name] - old_shapes[name])
+            regrown = sorted(
+                name
+                for name in old_shapes.keys() & new_shapes.keys()
+                if new_shapes[name] - old_shapes[name] or (old_shapes[name] and not new_shapes[name])
+            )
             if regrown:
                 found.append(Binding(owner, f"<new element kind {', '.join(regrown)}>", "class-call" if owner else "import-risk"))
             old_names = {}
