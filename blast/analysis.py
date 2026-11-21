@@ -382,6 +382,20 @@ def _files_loading(source_root: Path, path: str) -> set[str]:
     return seen
 
 
+def _top_level_names(source_root: Path, path: str) -> set[str]:
+    """Classes, functions and other names the pristine module binds at top
+    level."""
+    tree = parse_cached((source_root / path).read_text("utf-8"))
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(target.id for target in targets if isinstance(target, ast.Name))
+    return names
+
+
 def _module_name(path: str) -> str:
     module = path[: -len(".py")].replace("/", ".")
     return module[: -len(".__init__")] if module.endswith(".__init__") else module
@@ -422,6 +436,10 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
                     loaders |= coverage.tests_in_test_file(rel)
                 else:
                     loaders |= coverage.tests_creating_module(_module_name(rel))
+            # A test that imports the module inside its own body (from
+            # sqlglot.dialects.athena import Athena) reads its names at run time.
+            for top_name in _top_level_names(source_root, path):
+                loaders |= coverage.names.get(top_name, 0)
             if not loaders:
                 return everything, f"{where}: {what}, no test known to load it"
             tests |= loaders

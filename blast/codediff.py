@@ -365,6 +365,11 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
         parts = [node.value]
     else:
         return None
+    # An augmented assignment reads its target first. In a class body an
+    # inherited name is not in the class namespace, so that read raises.
+    if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+        if node.target.id not in bound and node.target.id not in ALWAYS_BOUND:
+            return node.target.id
     for part in parts:
         pending, loads, local = [part], [], set()
         while pending:
