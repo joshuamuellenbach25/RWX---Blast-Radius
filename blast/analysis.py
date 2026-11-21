@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from blast.codediff import changed_bindings, diff_python, enclosing_spans, parse_cached, statement_spans
+from blast.codediff import _never_runs, changed_bindings, diff_python, enclosing_spans, parse_cached, statement_spans
 from blast.patch import FilePatch, PatchError, apply_file_patch, parse_patch
 
 # tests/test_typing.py compares the bytecode of the annotators defined in
@@ -249,6 +249,11 @@ def _module_scope_names(statement: ast.stmt) -> set[str]:
             names.add(node.name)
             continue
         if isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        if isinstance(node, ast.If) and _never_runs(node.test):
+            # Only type checkers enter if t.TYPE_CHECKING: (DataTypeArgs is
+            # bound there and nowhere at run time); its else branch runs.
+            pending.extend(node.orelse)
             continue
         if isinstance(node, ast.Import):
             names |= {alias.asname or alias.name.partition(".")[0] for alias in node.names}
