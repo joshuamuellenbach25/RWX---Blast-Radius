@@ -656,6 +656,13 @@ def _operations(nodes: list) -> Counter:
                     found[f"Operand.{_kind(operand)}"] += 1
             elif isinstance(sub, ast.UnaryOp):
                 found[f"UnaryOp.{type(sub.op).__name__}"] += 1
+            elif isinstance(sub, ast.Compare):
+                # An ordering of values that cannot be ordered (2 >= '2')
+                # raises TypeError, like arithmetic on them.
+                for op in sub.ops:
+                    found[f"Compare.{type(op).__name__}"] += 1
+                for operand in (sub.left, *sub.comparators):
+                    found[f"Operand.{_kind(operand)}"] += 1
             elif isinstance(sub, (ast.Set, ast.Dict)):
                 # An unhashable set member or key ([TokenType.BEGIN] in a set)
                 # and unpacking a non-mapping ({**True}) raise TypeError.
