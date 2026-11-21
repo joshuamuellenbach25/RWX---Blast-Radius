@@ -291,18 +291,78 @@ def bits(mask: int) -> list[int]:
 _UNRUN_WHY: dict[str, int] = {}
 
 
+# Temporary practice-board diagnostic v8: commit -> its file verdicts.
+_VERDICTS: dict[str, list] = {}
+_MODULE_REASONS = (
+    ("changed code runs at import", 0),
+    ("is read at import", 1),
+    ("read at import, class created before any test", 1),
+    ("in a module sqlglot imports", 2),
+    ("calls code at import", 3),
+    ("import statement changed", 4),
+    ("no binding found", 5),
+    ("unreadable statement", 5),
+    ("cannot compare statements", 5),
+    ("no creators and no readers", 6),
+    ("no test known to load it", 6),
+)
+_CORE = {
+    "sqlglot/parser.py", "sqlglot/tokens.py", "sqlglot/generator.py", "sqlglot/helper.py",
+    "sqlglot/__init__.py", "sqlglot/errors.py", "sqlglot/dialects/dialect.py", "sqlglot/dialects/__init__.py",
+}
+
+
+def _module_reason_code(note: str) -> int:
+    for text, code in _MODULE_REASONS:
+        if text in note:
+            return code
+    return 7
+
+
+def _area_code(path: str) -> int:
+    if path.startswith("sqlglot/expressions"):
+        return 0
+    if path in _CORE:
+        return 1
+    if path.startswith(("sqlglot/dialects/", "sqlglot/parsers/", "sqlglot/generators/", "sqlglot/typing/")):
+        return 2
+    return 3
+
+
+def _data_equal(verdict) -> bool:
+    """The fixture loaders' view (blank lines and SQL comment lines
+    dropped) of the data file is the same before and after the patch."""
+    if verdict.new_text is None:
+        return False
+    try:
+        old = (SOURCE_ROOT / verdict.path).read_text("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+
+    def kept_lines(text: str) -> list[str]:
+        return [line for line in text.splitlines() if line and not line.startswith("--")]
+
+    return kept_lines(old) == kept_lines(verdict.new_text)
+
+
 def _fleet_code(costly) -> int:
-    """Temporary practice-board diagnostic v7, 12 bits. Bits 0-1 the number
-    of lists of 1000 tests or more (at most 3); for the first one, bits 2-3
-    its run (0 none, 1 failed, 2 clean or no result, 3 import check failed
-    or gave no answer) and 4-5 its analysis (0 fallback, 1 an unknown
-    verdict, 2 a module or moved verdict, 3 other). Bits 6-7 the number of
-    other lists of at least 20 s with no run (at most 3); for the first one,
-    bits 8-9 why no run was planned (0 not verifiable, 1 no cheap candidate,
-    2 the gate refused, 3 no plan) and 10-11 its analysis (0 fallback, 1 an
-    unknown verdict, 2 a fixture or other file, 3 code or tests only)."""
+    """Temporary practice-board diagnostic v8, 12 bits. Bits 0-1 the number
+    of lists of 1000 tests or more (at most 3); for the first one, bits 2-4
+    the reason its first module verdict gives (0 changed code runs at
+    import, 1 a value read at import, 2 a statement that can raise in a
+    module sqlglot imports, 3 a call at import, 4 an import statement, 5 no
+    binding or an unreadable statement, 6 no creator, reader or loader known,
+    7 another reason or no module verdict) and bits 5-6 that file's part
+    (0 expressions, 1 parser, tokens, generator, helper or dialect base, 2 a
+    dialect part, 3 other). Bits 7-8 the number of other lists of at least
+    20 s with no run and a data file (at most 3); for the first one, bit 9
+    every data file reads the same to the fixture loaders, bit 10 every data
+    file is .sql, bit 11 the commit also changes Python."""
     log(f"fleet costly lists: {costly}")
-    return min(costly[0], 3) | costly[1] << 2 | costly[2] << 4 | min(costly[3], 3) << 6 | costly[4] << 8 | costly[5] << 10
+    return (
+        min(costly[0], 3) | costly[1] << 2 | costly[2] << 5 | min(costly[3], 3) << 7
+        | costly[4] << 9 | costly[5] << 10 | costly[6] << 11
+    )
 
 
 def _pad_to(answered, code, duration_ms) -> None:
@@ -408,6 +468,7 @@ def main() -> None:
             with _time_limit(min(left, max(2.0, 4 * share))):
                 analysis = analyze(text, SOURCE_ROOT, coverage)
             notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
+            _VERDICTS[commit] = list(analysis.files)  # diagnostic
             plans[commit] = plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit)
         except (Exception, AnalysisTimeout) as error:  # an unreadable commit runs every test
             log(f"{commit}: analysis failed, running every test: {error!r}")
@@ -434,7 +495,7 @@ def main() -> None:
     # has a changed module body nothing ran: unknown, so every test.
     checked = {job.commit for job in jobs if job.sources}
     answered = []  # (commit, workers, cost) for the diagnostic padding
-    costly = [0] * 6  # diagnostic v7: costly lists and their causes, see _fleet_code
+    costly = [0] * 7  # diagnostic v8: costly lists and their causes, see _fleet_code
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
@@ -470,23 +531,22 @@ def main() -> None:
         ordered = sorted(chosen)
         cost, workers = pack(ordered, duration_ms)
         if cost >= 20000:
-            note = notes[commit]
+            verdicts = _VERDICTS.get(commit, [])
+            data = [v for v in verdicts if v.kind in ("fixture", "other", "moved")]
             if len(ordered) >= 1000:
                 costly[0] += 1
                 if costly[0] == 1:
-                    costly[1] = {"unrun": 0, "failed": 1, "import": 3}.get(kind, 2)
-                    costly[2] = (
-                        0 if note.startswith("fallback") else 1 if "unknown:" in note
-                        else 2 if "module:" in note or "moved:" in note else 3
-                    )
-            elif kind == "unrun":
+                    module = next((v for v in verdicts if v.kind == "module"), None)
+                    costly[1] = _module_reason_code(module.note) if module else 7
+                    costly[2] = _area_code(module.path) if module else 3
+                    log(f"{commit}: fleet list-all from {module.path if module else None}: {module.note if module else ''}")
+            elif kind == "unrun" and data:
                 costly[3] += 1
                 if costly[3] == 1:
-                    costly[4] = _UNRUN_WHY.get(commit, 3)
-                    costly[5] = (
-                        0 if note.startswith("fallback") else 1 if "unknown:" in note
-                        else 2 if "fixture:" in note or "other:" in note else 3
-                    )
+                    costly[4] = int(all(_data_equal(v) for v in data))
+                    costly[5] = int(all(v.path.endswith(".sql") for v in data))
+                    costly[6] = int(any(v.path.endswith(".py") and v.kind != "same" for v in verdicts))
+                    log(f"{commit}: fleet data list from {[v.path for v in data]}")
         answered.append((commit, workers, cost))
         log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}] why {_UNRUN_WHY.get(commit, 3)}")
 
