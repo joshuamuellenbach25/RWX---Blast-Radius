@@ -735,6 +735,22 @@ def _module_name(path: str) -> str:
     return module[: -len(".__init__")] if module.endswith(".__init__") else module
 
 
+def _module_loaders(path: str, coverage: CoverageMap, source_root: Path) -> int:
+    """The tests that load a module. Every module that imports it loads it
+    too: the tests that create any of their classes, and every test of the
+    test files among them. A test that imports the module inside its own body
+    (from sqlglot.dialects.athena import Athena) reads its names at run time."""
+    loaders = coverage.tests_touching_file(path)
+    for rel in _files_loading(source_root, path):
+        if rel.startswith("tests/"):
+            loaders |= coverage.tests_in_test_file(rel)
+        else:
+            loaders |= coverage.tests_creating_module(_module_name(rel))
+    for top_name in _top_level_names(source_root, path):
+        loaders |= coverage.names.get(top_name, 0)
+    return loaders
+
+
 def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root: Path) -> tuple[int, str]:
     """Tests that can see a changed module-level or class-level binding."""
     everything = coverage.all_tests
@@ -761,19 +777,7 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
             what = "class-body call" if binding.name == "<call>" else binding.name
             if not (_loaded_on_demand(path) or path.startswith("tests/")):
                 return everything, f"{where}: {what} in a module sqlglot imports"
-            # Every module that imports this one fails to load with it: the
-            # tests that create any of their classes, and every test of the
-            # test files among them.
-            loaders = coverage.tests_touching_file(path)
-            for rel in _files_loading(source_root, path):
-                if rel.startswith("tests/"):
-                    loaders |= coverage.tests_in_test_file(rel)
-                else:
-                    loaders |= coverage.tests_creating_module(_module_name(rel))
-            # A test that imports the module inside its own body (from
-            # sqlglot.dialects.athena import Athena) reads its names at run time.
-            for top_name in _top_level_names(source_root, path):
-                loaders |= coverage.names.get(top_name, 0)
+            loaders = _module_loaders(path, coverage, source_root)
             if not loaders:
                 return everything, f"{where}: {what}, no test known to load it"
             tests |= loaders
@@ -794,7 +798,15 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
             body = coverage.tests_covering(path, range(first, last + 1))
         if not binding.owner:
             if read_at_import and binding.kind != "def":
-                return everything, f"module global {name} is read at import"
+                # What a value read at import builds lives in the modules that
+                # load it. A dialect part loads on demand, so only its loaders
+                # can see it; a load that now fails is the import check's.
+                loaders = _module_loaders(path, coverage, source_root) if _loaded_on_demand(path) else 0
+                if not loaders:
+                    return everything, f"module global {name} is read at import"
+                tests |= loaders | readers | body
+                notes.append(f"{name}: read at import, every test that loads the module")
+                continue
             tests |= readers | body
             notes.append(f"{name}: readers")
             continue
