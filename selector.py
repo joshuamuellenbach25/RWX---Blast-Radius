@@ -182,10 +182,11 @@ def _add_fleet_signal(answered, large, duration_ms) -> None:
     """Temporary practice-board diagnostic. The board shows only totals, to
     the millisecond per run, so tests whose recorded milliseconds add up to
     the code go on the busiest worker of the first commit that lists any
-    test. The code holds six counts of 2 bits each (at most 3): commits
+    test. The code holds seven counts of 2 bits each (at most 3): commits
     listing at least 1000 tests never analyzed, then by reason 1 to 4 (see
-    _large_reason), then commits with no local run listing 100 to 999
-    tests. At most 4095 ms, and no test that can fail is left out."""
+    _large_reason), then commits with no planned run listing 100 to 999
+    tests, then commits whose planned run returned no result. At most
+    16383 ms, and no test that can fail is left out."""
     code = sum(min(count, 3) << (2 * index) for index, count in enumerate(large))
     for commit, workers in answered:
         if not workers:
@@ -304,7 +305,8 @@ def main() -> None:
 
     answered: list[tuple[str, list[list[int]]]] = []
     failed_ms = unrun_ms = 0  # diagnostic: board seconds by kind of commit
-    large = [0] * 6  # diagnostic: commits with large lists, see _add_fleet_signal
+    large = [0] * 7  # diagnostic: commits with large lists, see _add_fleet_signal
+    planned = {job.commit for job in jobs}
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
@@ -332,7 +334,9 @@ def main() -> None:
             failed_ms += cost
         elif category == "unrun":
             unrun_ms += cost
-        if len(ordered) >= 1000:
+        if category == "unrun" and commit in planned:
+            large[6] += 1
+        elif len(ordered) >= 1000:
             large[reasons.get(commit, 0)] += 1
         elif category == "unrun" and len(ordered) >= 100:
             large[5] += 1
