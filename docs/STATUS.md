@@ -1,12 +1,12 @@
 # Status
 
-Updated 2026-11-21 01:29 EST (practice board read at 01:20:40).
+Updated 2026-11-21 01:45 EST (practice board read at 01:30:55).
 
 | Measure | Seconds |
 |---|---|
 | Our best practice score | 256.0 |
-| Best score on the practice board | 146.3 |
-| Our target (that score minus 10%) | 131.67 |
+| Best score on the practice board | 142.9 |
+| Our target (that score minus 10%) | 128.61 |
 | Local run of 304103a on the 30 sample commits (scorer flags) | 148.3 |
 | Main on the 30 sample commits, sample answers as the oracle (estimate) | 130.7 |
 
