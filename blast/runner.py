@@ -84,6 +84,13 @@ class PatchedSourceFinder(importlib.abc.MetaPathFinder):
 # ----------------------------------------------------------------- running
 
 TIMEOUT_EXIT_CODE = 3
+# Test limits count CPU time, not wall time: on a host that starves the run of
+# CPU a wall timer ends a passing test before it got its CPU, the commit gets
+# no result and keeps every candidate. CPU time counts every thread, and
+# DuckDB runs one per core: 2 cores give up to 2 CPU seconds per second.
+TIMER = getattr(signal, "ITIMER_PROF", None)
+TIMER_SIGNAL = getattr(signal, "SIGPROF", None)
+CPU_PER_SECOND = 2.0
 
 
 def _on_alarm(signum, frame):
@@ -107,10 +114,10 @@ class _Recorder(unittest.TestResult):
 
     def startTest(self, test):
         super().startTest(test)
-        signal.setitimer(signal.ITIMER_REAL, self._limits.get(test.id(), 10.0))
+        signal.setitimer(TIMER, CPU_PER_SECOND * self._limits.get(test.id(), 10.0))
 
     def stopTest(self, test):
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.setitimer(TIMER, 0)
         super().stopTest(test)
 
     def _mark(self, test):
@@ -183,14 +190,14 @@ def run_tests(
         except Exception:  # a test file that cannot be imported fails all its tests
             failed.add(test["number"])
     inline_pool.install(modules)
-    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    previous = signal.signal(TIMER_SIGNAL, _on_alarm)
     recorder = _Recorder(limits)
     recorder.failfast = stop_at_first_failure
     try:
         suite.run(recorder)
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        signal.setitimer(TIMER, 0)
+        signal.signal(TIMER_SIGNAL, previous)
     for test_id in recorder.failed_ids:
         if test_id in by_unittest_id:
             failed.add(by_unittest_id[test_id]["number"])
