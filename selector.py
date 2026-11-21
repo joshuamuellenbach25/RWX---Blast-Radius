@@ -292,11 +292,11 @@ def main() -> None:
         if time.monotonic() > analysis_end:
             notes[commit] = "fallback: analysis time used up"
             continue
-        patch_path = DATA / "commits" / f"{commit}.patch"
-        if patch_path.stat().st_size > MAX_PATCH_BYTES:
-            notes[commit] = "fallback: patch too large to read"
-            continue
         try:
+            patch_path = DATA / "commits" / f"{commit}.patch"
+            if patch_path.stat().st_size > MAX_PATCH_BYTES:
+                notes[commit] = "fallback: patch too large to read"
+                continue
             # Strict decoding: a byte that is not UTF-8 makes the file fail to
             # import on disk even inside a comment, so such a commit runs every test.
             text = patch_path.read_bytes().decode("utf-8")
@@ -321,6 +321,9 @@ def main() -> None:
             stage = 1
             log(f"verification failed: {error!r}")
     _report_stage(stage, len(jobs), len(results), len(commits))
+    passed = sum(1 for result in results.values() if result.get("ok") and not result.get("failed"))
+    complete = sum(1 for result in results.values() if result.get("summary", {}).get("complete"))
+    log(f"results: {sum(bool(r.get('ok')) for r in results.values())} ran, {passed} with no failure, {complete} complete")
 
     lines = []
     for commit in commits:
