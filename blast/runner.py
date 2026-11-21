@@ -83,12 +83,19 @@ class PatchedSourceFinder(importlib.abc.MetaPathFinder):
 
 # ----------------------------------------------------------------- running
 
-class TestTimeout(BaseException):
-    """Raised by the alarm when one test runs past its limit."""
+TIMEOUT_EXIT_CODE = 3
 
 
 def _on_alarm(signum, frame):
-    raise TestTimeout()
+    """A test ran past its limit. Raising here would not stop it: unittest
+    catches everything inside a subTest and carries on with no timer armed.
+    So the child ends at once; the commit then has no result and the
+    selector lists every candidate for it."""
+    import os
+
+    sys.stderr.write("test time limit reached, ending this commit's run\n")
+    sys.stderr.flush()
+    os._exit(TIMEOUT_EXIT_CODE)
 
 
 class _Recorder(unittest.TestResult):

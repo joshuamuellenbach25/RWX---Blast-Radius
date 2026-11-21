@@ -85,7 +85,9 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             if remaining < 5:
                 print(f"{job.commit}: no time left", file=sys.stderr, flush=True)
                 continue
-            budget = min(remaining, 5.0 + sum(_limit(test) for test in job.tests))
+            # Sized from recorded time, so a hang in setUpClass or in C code
+            # (where no test timer can act) ends after a bounded spend.
+            budget = min(remaining, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests))
             child = os.fork()
             if child == 0:
                 _child_main(job, index)
