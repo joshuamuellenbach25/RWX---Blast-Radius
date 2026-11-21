@@ -143,8 +143,8 @@ def _import_failure(sources: list, root: str = "/sqlglot") -> str:
     table built with an empty key raises IndexError at import, which no
     static reading shows); "" otherwise. All of a commit's changed modules
     run together, so one that reads a name another adds sees it. Old bodies
-    that also raise when run again, or a run that times out, are no
-    evidence either way."""
+    that do not run clean again are no evidence either way; new bodies that
+    do not finish where the old ones did are named too, as no answer."""
     olds, news = [], []
     for name, path, new_text in _dependency_order(sources):
         filename = os.path.join(root, path)
@@ -154,9 +154,16 @@ def _import_failure(sources: list, root: str = "/sqlglot") -> str:
         except OSError:
             return ""
         news.append((name, filename, new_text))
-    if not news or _bodies_run(olds) != 0 or _bodies_run(news) != RAISED:
+    if not news or _bodies_run(olds) != 0:
         return ""
-    return ", ".join(name for name, _, _ in news)
+    outcome = _bodies_run(news)
+    if outcome == 0:
+        return ""
+    # A new body that raises fails every importer. One that does not finish
+    # (the 10 s alarm, a signal) where the old one did is no answer either:
+    # unknown, so every test is listed for it too.
+    names = ", ".join(name for name, _, _ in news)
+    return names if outcome == RAISED else f"{names} (no answer)"
 
 
 def _run_job(job: Job, index) -> dict:

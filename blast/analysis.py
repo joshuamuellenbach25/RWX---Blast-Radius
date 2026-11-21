@@ -190,6 +190,28 @@ def analyze(patch_text: str, source_root: Path, coverage: CoverageMap) -> Commit
     return CommitAnalysis(verdicts)
 
 
+def _docstrings(text: str) -> dict[tuple[str, ...], str | None]:
+    """The docstring of the module and of every class and function, by their
+    nesting path (defs inside if and try blocks included); empty when the
+    text does not parse."""
+    try:
+        tree = parse_cached(text)
+    except SyntaxError:
+        return {}
+    found: dict[tuple[str, ...], str | None] = {(): ast.get_docstring(tree, clean=False)}
+    pending: list[tuple[tuple[str, ...], ast.AST]] = [((), tree)]
+    while pending:
+        owner, node = pending.pop()
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                key = (*owner, child.name)
+                found[key] = ast.get_docstring(child, clean=False)
+                pending.append((key, child))
+            elif isinstance(child, ast.stmt):
+                pending.append((owner, child))
+    return found
+
+
 def _star_names(source_root: Path, text: str) -> set[str] | None:
     """The names a module's star imports bind, from the pinned source: every
     public module-level name of each sqlglot module it star-imports (none
@@ -338,7 +360,14 @@ def analyze_python(
     everything = coverage.all_tests
     filename = "/sqlglot/" + path
     diff = diff_python(old_text, new_text, filename)
+    # A docstring is a value at run time (__doc__) that the compared code
+    # does not carry and no swap of function code applies: a package file
+    # whose docstrings change is checked in a fresh run (a module verdict),
+    # where a test that reads one sees the new text.
+    docs_changed = path.startswith("sqlglot/") and _docstrings(old_text) != _docstrings(new_text)
     if diff.same_behavior:
+        if docs_changed:
+            return FileVerdict(path, "module", 0, "docstring changed", new_text=new_text)
         return FileVerdict(path, "same", 0, "identical bytecode", new_text=new_text)
     if diff.syntax_error:
         return FileVerdict(path, "unknown", everything, "new text does not compile", new_text=new_text)
@@ -353,7 +382,7 @@ def analyze_python(
     if diff.function_level_only:
         if runs_at_import:
             return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
-        kind = "test_function" if path.startswith("tests/") else "function"
+        kind = "test_function" if path.startswith("tests/") else "module" if docs_changed else "function"
         swaps = function_changes + list(diff.ancestors)
         return FileVerdict(path, kind, function_tests, function_note, swaps, new_text)
 
