@@ -490,6 +490,7 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
 
 _LITERAL_START = re.compile(r"""^[rRbBuUfF]{0,2}['"]""")
 _BRANCH = re.compile(r"elif\b|else\s*:")
+_HANDLER = re.compile(r"except\b|finally\s*:")
 # Flags that change what a call returns or accepts: a return made a yield
 # turns the function into a generator, and every caller gets one.
 RESHAPING_FLAGS = (
@@ -526,6 +527,8 @@ def _insertion_points(patch, inert: set[int] | frozenset[int] = frozenset()) -> 
         start, in_run, removed, added = old_line, False, False, False
         removed_indent = added_indent = None
         removed_branches = added_branches = 0
+        removed_handlers: list[str] = []
+        added_handlers: list[str] = []
         for line in [*hunk.lines, " "]:  # the sentinel closes the last run
             tag = line[:1]
             if tag == "\\":
@@ -539,26 +542,34 @@ def _insertion_points(patch, inert: set[int] | frozenset[int] = frozenset()) -> 
                 code = text.strip() and not text.strip().startswith("#")
                 indent = len(text) - len(text.lstrip(" \t")) if code else None
                 branch = bool(indent is not None and _BRANCH.match(text.strip()))
+                handler = text.strip() if indent is not None and _HANDLER.match(text.strip()) else None
                 if tag == "-":
                     if indent is not None and old_line not in inert:
                         removed = True
                         removed_indent = indent if removed_indent is None else min(removed_indent, indent)
                         removed_branches += branch
+                        removed_handlers += [handler] if handler else []
                     old_line += 1
                 elif indent is not None:
                     added = True
                     added_indent = indent if added_indent is None else min(added_indent, indent)
                     added_branches += branch
+                    added_handlers += [handler] if handler else []
                 continue
             dedented = removed_indent is not None and added_indent is not None and added_indent < removed_indent
             # An elif made an if (or an else removed) now runs on the paths
             # the branches before it took, which its old line never saw.
             unchained = added_branches < removed_branches
-            if added and (not removed or dedented or unchained):
+            # A changed except or finally header changes when its block runs
+            # (except made finally runs it on every call); the old header
+            # line only ran on the paths that raised.
+            rehandled = sorted(removed_handlers) != sorted(added_handlers)
+            if added and (not removed or dedented or unchained or rehandled):
                 points.add(start)
             in_run = removed = added = False
             removed_indent = added_indent = None
             removed_branches = added_branches = 0
+            removed_handlers, added_handlers = [], []
             old_line += 1
     return points
 
