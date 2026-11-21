@@ -125,6 +125,27 @@ def fingerprint(code: CodeType) -> tuple:
     )
 
 
+def same_raw(old: CodeType, new: CodeType) -> bool:
+    """A cheap test that two code objects fingerprint the same: equal raw
+    bytecode and equal tables. Line numbers live outside co_code, so most
+    unchanged code passes here without being disassembled; any difference
+    falls back to the full fingerprint."""
+    return (
+        old.co_code == new.co_code
+        and old.co_names == new.co_names
+        and old.co_varnames == new.co_varnames
+        and old.co_freevars == new.co_freevars
+        and old.co_cellvars == new.co_cellvars
+        and old.co_argcount == new.co_argcount
+        and old.co_posonlyargcount == new.co_posonlyargcount
+        and old.co_kwonlyargcount == new.co_kwonlyargcount
+        and old.co_flags == new.co_flags
+        and old.co_exceptiontable == new.co_exceptiontable
+        and len(old.co_consts) == len(new.co_consts)
+        and all(_const_key(a) == _const_key(b) for a, b in zip(old.co_consts, new.co_consts))
+    )
+
+
 def code_tree(code: CodeType, parents: dict | None = None) -> dict[tuple, CodeType]:
     """Every code object under `code`, keyed by its qualname and its position
     among siblings with the same qualname. Fills `parents` (key -> parent key)
@@ -178,7 +199,7 @@ def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
             result.unmatched.append(key)
             continue
         old_node, new_node = old_tree[key], new_tree[key]
-        if fingerprint(old_node) != fingerprint(new_node):
+        if not same_raw(old_node, new_node) and fingerprint(old_node) != fingerprint(new_node):
             result.changed.append(ChangedCode(key, old_node, new_node))
     changed_keys = {change.path for change in result.changed}
     ancestor_keys: set = set()
