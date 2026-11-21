@@ -39,20 +39,27 @@ class FilePatch:
 
     def changed_old_lines(self) -> set[int]:
         """Old line numbers that were removed or replaced, plus the old lines
-        on both sides of every pure insertion."""
+        on both sides of every pure insertion (a run of added lines with no
+        removed line: a replacement's added lines run where its removed ones
+        ran, so its neighbors add nothing)."""
         changed: set[int] = set()
         for hunk in self.hunks:
             old_line = hunk.old_start
-            for line in hunk.lines:
+            removed, inserted_at = False, None
+            for line in [*hunk.lines, " "]:  # the sentinel closes the last run
                 tag = line[:1]
-                if tag == " ":
-                    old_line += 1
-                elif tag == "-":
+                if tag == "-":
                     changed.add(old_line)
+                    removed = True
                     old_line += 1
                 elif tag == "+":
-                    changed.add(old_line - 1)
-                    changed.add(old_line)
+                    if inserted_at is None:
+                        inserted_at = old_line
+                elif tag == " ":
+                    if inserted_at is not None and not removed:
+                        changed.update((inserted_at - 1, inserted_at))
+                    removed, inserted_at = False, None
+                    old_line += 1
         return {line for line in changed if line > 0}
 
 

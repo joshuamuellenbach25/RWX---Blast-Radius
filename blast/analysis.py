@@ -251,8 +251,8 @@ LOADED_WITH_SQLGLOT = {
     "sqlglot/parsers/base.py", "sqlglot/typing/__init__.py",
 }
 # Unindented imports run when their file loads; indented ones run later or never.
-_PART_IMPORT = re.compile(r"^(?:from|import) ((?:sqlglot\.(?:dialects|generators|parsers|typing)|tests)(?:\.\w+)+)", re.M)
-_DIALECT_NAMES = re.compile(r"^from sqlglot\.dialects import (?:\(([^)]*)\)|([\w ,]+))", re.M)
+_IMPORT = re.compile(r"^import ((?:sqlglot|tests)(?:\.\w+)*)", re.M)
+_FROM = re.compile(r"^from ((?:sqlglot|tests)(?:\.\w+)*) import (?:\(([^)]*)\)|([\w ,]+))", re.M)
 _import_graphs: dict[Path, dict[str, set[str]]] = {}
 
 
@@ -262,23 +262,46 @@ def _loaded_on_demand(path: str) -> bool:
     return path.startswith(ON_DEMAND_PREFIXES) and path not in LOADED_WITH_SQLGLOT and not path.endswith("/__init__.py")
 
 
+def _module_files(source_root: Path, module: str) -> list[str]:
+    """The files that importing `module` runs: each package's __init__.py on
+    the way down, then the module itself."""
+    parts = module.split(".")
+    files = []
+    for depth in range(1, len(parts) + 1):
+        base = "/".join(parts[:depth])
+        for candidate in (f"{base}/__init__.py", f"{base}.py"):
+            if (source_root / candidate).is_file():
+                files.append(candidate)
+                break
+    return files
+
+
 def _top_level_imports(source_root: Path, rel: str) -> set[str]:
-    """Dialect parts and test modules that `rel` imports as it loads."""
+    """The sqlglot and test files that `rel` runs as it loads."""
     text = (source_root / rel).read_text("utf-8")
-    found = {match.group(1).replace(".", "/") + ".py" for match in _PART_IMPORT.finditer(text)}
-    for match in _DIALECT_NAMES.finditer(text):
-        # sqlglot.dialects loads a dialect's module on first access to its name.
-        for name in re.split(r"[\s,]+", match.group(1) or match.group(2)):
-            if name:
-                found.add(f"sqlglot/dialects/{name.lower()}.py")
-    return {rel_path for rel_path in found if (source_root / rel_path).is_file()}
+    found: set[str] = set()
+    for match in _IMPORT.finditer(text):
+        found.update(_module_files(source_root, match.group(1)))
+    for match in _FROM.finditer(text):
+        module = match.group(1)
+        found.update(_module_files(source_root, module))
+        for name in re.split(r"[\s,]+", match.group(2) or match.group(3)):
+            if not name or name == "as":
+                continue
+            # A name can be a submodule; sqlglot.dialects also loads a
+            # dialect's module on first access to its class name.
+            found.update(_module_files(source_root, f"{module}.{name}"))
+            if module == "sqlglot.dialects":
+                found.update(_module_files(source_root, f"{module}.{name.lower()}"))
+    return found
 
 
 def _test_files_loading(source_root: Path, path: str) -> list[str]:
     """Test files that load `path` while they load, directly or through the
-    dialect parts and test modules they import (33 dialect test files import
-    tests/dialects/test_dialect.py, which imports five dialects). If `path`
-    raises on import, every test in these files fails."""
+    modules they import (33 dialect test files import
+    tests/dialects/test_dialect.py, which imports five dialects; the executor
+    imports the Python generator). If `path` raises on import, every test in
+    these files fails."""
     graph = _import_graphs.get(source_root)
     if graph is None:
         tests_dir = source_root / "tests"
@@ -368,6 +391,10 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
         if binding.kind == "class":
             creators |= coverage.tests_creating(f"{owner_key}.{name}")
         if not creators:
+            # The class is created at import, before any test: a value read
+            # at import can break whatever module reads it, so every test.
+            if read_at_import:
+                return everything, f"{owner_key}.{name}: read at import, class created before any test"
             if not readers:
                 return everything, f"{owner_key}.{name}: no creators and no readers"
             tests |= readers | body

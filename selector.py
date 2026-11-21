@@ -218,11 +218,17 @@ def main() -> None:
     plans: dict[str, tuple[set[int], set[int], set[int]]] = {}
     jobs: list[Job] = []
     notes: dict[str, str] = {}
+    # Analysis stops at 40% of the run limit: a batch of huge patches must
+    # still answer in time, the rest listing every test.
+    analysis_end = started + time_budget(len(commits)) * 2 / 3
     for commit in commits:
         kept: set[int] = set(all_numbers)
         notes[commit] = "fallback"
         plans[commit] = (kept, set(), set())
         if coverage is None:
+            continue
+        if time.monotonic() > analysis_end:
+            notes[commit] = "fallback: analysis time used up"
             continue
         try:
             # Strict decoding: a byte that is not UTF-8 makes the file fail to
