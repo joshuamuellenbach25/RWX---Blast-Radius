@@ -12,7 +12,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from blast.codediff import _never_runs, changed_bindings, diff_python, enclosing_spans, parse_cached, statement_spans
+from blast.codediff import (
+    _declared_coding, _never_runs, changed_bindings, diff_python, enclosing_spans, parse_cached, statement_spans,
+)
 from blast.patch import FilePatch, PatchError, apply_file_patch, parse_patch
 
 # tests/test_typing.py compares the bytecode of the annotators defined in
@@ -68,9 +70,9 @@ def _imported_names(source_root: Path) -> set[str]:
 
 
 def _same_syntax_tree(old_text: str, new_text: str) -> bool:
-    """Equal syntax trees and equal first two lines (where a coding
-    declaration would change how the file decodes)."""
-    if old_text.splitlines()[:2] != new_text.splitlines()[:2]:
+    """Equal syntax trees and equal coding declarations (which change how
+    the file decodes); any other comment may change."""
+    if _declared_coding(old_text) != _declared_coding(new_text):
         return False
     try:
         return ast.dump(ast.parse(old_text)) == ast.dump(ast.parse(new_text))
@@ -460,7 +462,7 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
         # Q2's proof that a change breaks nothing: the same syntax tree (a
         # comment, a blank line), with the first two lines, where a coding
         # declaration sits, unchanged.
-        if path.endswith(".py") and _same_syntax_tree(old_text, new_text):
+        if path.endswith(".py") and len(new_text) <= MAX_PYTHON_CHARS and _same_syntax_tree(old_text, new_text):
             return FileVerdict(path, "same", 0, "identical syntax tree", new_text=new_text)
         return FileVerdict(path, "unknown", everything, "runner configuration", new_text=new_text)
 
@@ -653,6 +655,51 @@ def _top_level_names(source_root: Path, path: str) -> set[str]:
     return {node.name for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
+_direct_reader_cache: dict[tuple[Path, str], int] = {}
+
+
+def _tests_reading_attribute(source_root: Path, owner: tuple, name: str, coverage: "CoverageMap") -> int:
+    """Tests whose own code names Owner.attribute (a local subclass that
+    copies SnowflakeParser.FUNCTIONS): the test functions that name it, or
+    every test of a file that names it outside its test functions."""
+    dotted = ".".join((*owner, name))
+    key = (source_root, dotted)
+    if key in _direct_reader_cache:
+        return _direct_reader_cache[key]
+    pattern = re.compile(rf"\b{re.escape(dotted)}\b")
+    index = {test_id: bit for bit, test_id in enumerate(coverage.test_ids)}
+    found = 0
+    for file in (source_root / "tests").rglob("*.py"):
+        try:
+            text = file.read_text("utf-8", errors="replace")
+        except OSError:
+            continue
+        if not pattern.search(text):
+            continue
+        rel = file.relative_to(source_root).as_posix()
+        lines = text.splitlines()
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            found |= coverage.tests_in_test_file(rel)
+            continue
+        inside: set[int] = set()
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for method in node.body:
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name.startswith("test"):
+                    span = range(method.lineno, (method.end_lineno or method.lineno) + 1)
+                    inside.update(span)
+                    if pattern.search("\n".join(lines[span.start - 1: span.stop - 1])):
+                        test_id = f"{rel}::{node.name}::{method.name}"
+                        found |= 1 << index[test_id] if test_id in index else coverage.tests_in_test_file(rel)
+        if any(pattern.search(line) for number, line in enumerate(lines, 1) if number not in inside):
+            found |= coverage.tests_in_test_file(rel)
+    _direct_reader_cache[key] = found
+    return found
+
+
 def _module_name(path: str) -> str:
     module = path[: -len(".py")].replace("/", ".")
     return module[: -len(".__init__")] if module.endswith(".__init__") else module
@@ -735,11 +782,14 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
             tests |= readers | body
             notes.append(f"{owner_key}.{name}: readers, class never created")
             continue
+        # A test can read the attribute straight off the class without
+        # creating it (a local subclass copying SnowflakeParser.FUNCTIONS).
+        direct = _tests_reading_attribute(source_root, binding.owner, name, coverage)
         if read_at_import or not readers or binding.added or binding.kind == "class":
-            tests |= creators | body
+            tests |= creators | body | direct
             notes.append(f"{owner_key}.{name}: all creators")
         else:
-            tests |= (creators & readers) | body
+            tests |= (creators & readers) | body | direct
             notes.append(f"{owner_key}.{name}: creators that read it")
     return tests, "; ".join(notes)
 
