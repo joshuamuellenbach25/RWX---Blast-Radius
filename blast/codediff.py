@@ -520,6 +520,40 @@ def _value_kinds(nodes: list) -> dict[str, str]:
     return kinds
 
 
+def _shapes(node: ast.AST, prefix: str = "") -> set[str]:
+    """The kinds of the elements of a literal container, with the containers
+    they sit in: [("x", "y")] gives List>Tuple and List>Tuple>Constant.str."""
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        inner = list(node.elts)
+    elif isinstance(node, ast.Dict):
+        inner = [n for n in (*node.keys, *node.values) if n is not None]
+    else:
+        return set()
+    here = f"{prefix}{type(node).__name__}>"
+    found: set[str] = set()
+    for element in inner:
+        found.add(here + _kind(element))
+        found |= _shapes(element, here)
+    return found
+
+
+def _element_shapes(nodes: list) -> dict[str, set[str]]:
+    """name -> the element kinds of the literal container a simple assignment
+    gives it."""
+    shapes: dict[str, set[str]] = {}
+    for node in nodes:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                shapes[target.id] = _shapes(value)
+    return shapes
+
+
 def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
     Function bodies are left out: bytecode comparison covers them."""
@@ -571,6 +605,14 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             retyped = sorted(name for name in old_kinds.keys() & new_kinds.keys() if old_kinds[name] != new_kinds[name])
             if retyped:
                 found.append(Binding(owner, f"<new kind of value {', '.join(retyped)}>", "class-call" if owner else "import-risk"))
+            # An element of a new kind in an existing container (1 put in a
+            # list of pairs) breaks code that unpacks it at import, such as a
+            # tokenizer building its tables. More elements of the kinds
+            # already there do not count.
+            old_shapes, new_shapes = _element_shapes(olds), _element_shapes(news)
+            regrown = sorted(name for name in old_shapes.keys() & new_shapes.keys() if new_shapes[name] - old_shapes[name])
+            if regrown:
+                found.append(Binding(owner, f"<new element kind {', '.join(regrown)}>", "class-call" if owner else "import-risk"))
             old_names = {}
             for node in olds:
                 for name, kind in _bound_names(node):
