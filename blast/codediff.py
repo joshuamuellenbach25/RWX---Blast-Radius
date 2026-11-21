@@ -349,11 +349,10 @@ def _bound_names(node: ast.stmt) -> list[tuple[str, str]]:
 def _calls_code(node: ast.stmt) -> bool:
     """Whether running this statement at import calls any code: a call can
     import modules or register objects, effects no name binding shows. A def
-    runs its decorators and default values; a class its bases and keywords."""
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
-    elif isinstance(node, ast.ClassDef):
-        parts = [*node.bases, *node.keywords, *node.decorator_list]
+    runs its decorators, default values and, where the module evaluates
+    them, annotations; a class its bases and keywords."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        parts = _evaluated_parts(node)
     else:
         parts = [node]
     return any(isinstance(sub, ast.Call) for part in parts for sub in ast.walk(part))
