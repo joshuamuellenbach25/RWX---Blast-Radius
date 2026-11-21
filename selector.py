@@ -363,3 +363,11 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Every answer is written by now. A log line that a closed or full stderr
+    # refused stays in its buffer, and the interpreter's own flush at exit
+    # would then fail and turn the exit status into 120, which rejects the
+    # run. Flush once here; if that fails, leave without the second flush.
+    try:
+        sys.stderr.flush()
+    except OSError:
+        os._exit(0)
