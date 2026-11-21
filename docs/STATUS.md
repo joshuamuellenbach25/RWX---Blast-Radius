@@ -1,6 +1,6 @@
 # Status
 
-Updated 2026-11-21 03:56 EST (practice board read between 03:06 and 03:09). The two review items open at 03:38 are fixed in 56a5838. Next practice slot, 04:01 EST: diagnostic 8a38db0, which reruns the first failing test of up to two failed runs on unpatched code. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
+Updated 2026-11-21 04:25 EST. Diagnostic BB-6D152AEF (04:02 EST, 256.2 s) showed no load errors and failing tests that pass on unpatched code: the practice commits break the tests the local runs check. Next practice slot, 05:02 EST: diagnostic a73870d, which splits the board seconds between commits whose local run failed and commits with no local run. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
 
 | Measure | Seconds |
 |---|---|
