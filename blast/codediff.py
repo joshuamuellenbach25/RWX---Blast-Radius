@@ -350,12 +350,47 @@ ALWAYS_BOUND = set(dir(builtins)) | {
 }
 
 
+def _unbound_body(body: list, bound: set[str]) -> str | None:
+    """The first unbound name the statements of one branch read, in order."""
+    seen = set(bound)
+    for child in body:
+        missing = _unbound_load(child, seen)
+        if missing:
+            return missing
+        seen |= _binds(child)
+    return None
+
+
+def _target_names(target: ast.AST | None) -> set[str]:
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} if target is not None else set()
+
+
 def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
-    """A name this simple statement reads when it runs at import that nothing
-    has bound yet, so running it raises NameError. Lambda bodies run later,
-    and compound statements are not read (None: no claim)."""
+    """A name this statement reads when it runs at import that nothing has
+    bound yet, so running it raises NameError. Lambda bodies run later. A
+    compound statement is read through its header and each branch; a branch
+    starts from the names bound before it (None: no claim)."""
     if "*" in bound:  # a star import binds names no statement shows
         return None
+    if isinstance(node, (ast.If, ast.While)):
+        return _unbound_in([node.test], bound) or _unbound_body(node.body, bound) or _unbound_body(node.orelse, bound)
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        inner = bound | _target_names(node.target)
+        return _unbound_in([node.iter], bound) or _unbound_body(node.body, inner) or _unbound_body(node.orelse, inner)
+    if isinstance(node, (ast.With, ast.AsyncWith)):
+        inner = bound.union(*(_target_names(item.optional_vars) for item in node.items))
+        return _unbound_in([item.context_expr for item in node.items], bound) or _unbound_body(node.body, inner)
+    if isinstance(node, ast.Try):
+        # A handler can run after part of the body bound its names; counting
+        # them as bound avoids claiming a NameError that may not happen.
+        after = bound | {name for child in node.body for name in _binds(child)}
+        return (
+            _unbound_body(node.body, bound)
+            or next((m for h in node.handlers if (m := _unbound_in([h.type] if h.type else [], after)
+                                                  or _unbound_body(h.body, after | ({h.name} if h.name else set())))), None)
+            or _unbound_body(node.orelse, after)
+            or _unbound_body(node.finalbody, after)
+        )
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
     elif isinstance(node, ast.ClassDef):
@@ -371,6 +406,11 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
     if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
         if node.target.id not in bound and node.target.id not in ALWAYS_BOUND:
             return node.target.id
+    return _unbound_in(parts, bound)
+
+
+def _unbound_in(parts: list, bound: set[str]) -> str | None:
+    """The first name these expressions read that nothing has bound."""
     for part in parts:
         pending, loads, local = [part], [], set()
         while pending:
