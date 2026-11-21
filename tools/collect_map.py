@@ -29,12 +29,55 @@ import time
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from blast import inline_pool  # noqa: E402
+
 ROOT = "/sqlglot/"
 TRACKED_PREFIXES = ("/sqlglot/sqlglot/", "/sqlglot/tests/")
 TOOL_ID = sys.monitoring.COVERAGE_ID
 
 recorded_lines: set[tuple[str, int]] = set()
 recorded_opens: set[str] = set()
+recorded_classes: set[type] = set()
+
+
+def _all_subclasses(base: type) -> list[type]:
+    found, stack = [], [base]
+    while stack:
+        current = stack.pop()
+        found.append(current)
+        stack.extend(current.__subclasses__())
+    return found
+
+
+def _recording_init(original):
+    def __init__(self, *args, **kwargs):
+        recorded_classes.add(type(self))
+        return original(self, *args, **kwargs)
+
+    __init__.__wrapped__ = original
+    return __init__
+
+
+def instrument_instantiation() -> int:
+    """Record the type of every Dialect, Tokenizer, Parser, Generator and
+    expression object a test creates, by wrapping each class's own __init__."""
+    from sqlglot.dialects.dialect import Dialect
+    from sqlglot.expressions.core import Expr
+    from sqlglot.generator import Generator
+    from sqlglot.parser import Parser
+    from sqlglot.tokens import Tokenizer
+
+    wrapped = 0
+    seen: set[type] = set()
+    for base in (Dialect, Expr, Generator, Parser, Tokenizer):
+        for cls in _all_subclasses(base):
+            if cls in seen or "__init__" not in cls.__dict__:
+                continue
+            seen.add(cls)
+            cls.__init__ = _recording_init(cls.__dict__["__init__"])
+            wrapped += 1
+    return wrapped
 
 
 def on_line(code, line_number):
@@ -97,6 +140,10 @@ def import_everything(tests: list[dict]) -> dict:
         importlib.import_module(module_name)
         lines, opens = take_records()
         per_test_module[module_name] = {"lines": group_lines(lines), "opens": opens}
+    replaced = inline_pool.install([sys.modules[name] for name in per_test_module])
+    wrapped = instrument_instantiation()
+    recorded_classes.clear()
+    print(f"inline pool in {replaced}; {wrapped} __init__ methods wrapped", file=sys.stderr, flush=True)
     return {
         "sqlglot": {"lines": group_lines(sqlglot_lines), "opens": sqlglot_opens},
         "test_modules": per_test_module,
@@ -115,6 +162,7 @@ def run_one_test(test: dict) -> dict:
     result = unittest.TestResult()
     sys.monitoring.restart_events()
     take_records()
+    recorded_classes.clear()
     started = os.times()
     suite.run(result)
     finished = os.times()
@@ -134,6 +182,7 @@ def run_one_test(test: dict) -> dict:
         "peak_mb": peak_megabytes,
         "lines": group_lines(lines),
         "opens": opens,
+        "classes": sorted(f"{cls.__module__}:{cls.__qualname__}" for cls in recorded_classes),
     }
 
 

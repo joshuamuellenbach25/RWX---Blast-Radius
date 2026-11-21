@@ -4,7 +4,7 @@ For each commit: the analysis verdict per file, whether the candidate tests
 hold every failing test (a miss otherwise), and the simulated cost of
 running every candidate.
 
-Usage: python tools/eval_analysis.py <source_root> <map.pkl.gz> <data_dir> <answers.json>
+Usage: python tools/eval_analysis.py <source_root> <map.json> <data_dir> <answers.json>
 """
 
 from __future__ import annotations

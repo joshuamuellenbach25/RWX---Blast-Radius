@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import gzip
-import pickle
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from blast.codediff import diff_python, enclosing_spans, statement_spans
+from blast.codediff import changed_bindings, diff_python, enclosing_spans, statement_spans
 from blast.patch import FilePatch, PatchError, apply_file_patch, parse_patch
 
 # Files pytest itself reads before any test runs: a change can alter every test.
@@ -17,37 +16,100 @@ RUNNER_CONFIG = {
 }
 
 
+class _MaskTable:
+    """key -> bitmask of tests, decoded from the map's shared sets on use."""
+
+    def __init__(self, indexes: dict[str, int], coverage: "CoverageMap"):
+        self._indexes = indexes
+        self._coverage = coverage
+
+    def get(self, key: str, default: int = 0) -> int:
+        index = self._indexes.get(key)
+        return default if index is None else self._coverage.mask(index)
+
+
 class CoverageMap:
+    """The per-test coverage of the pinned sqlglot commit (tools/build_map.py).
+    Tests are bitmasks over the map's own test numbering."""
+
     def __init__(self, path: Path):
-        data = pickle.loads(gzip.decompress(path.read_bytes()))
+        data = json.loads(path.read_text("utf-8"))
+        if data.get("format") != "blast-radius-map/1":
+            raise ValueError(f"unknown map format {data.get('format')!r} in {path}")
         self.test_count: int = data["test_count"]
-        self.lines: dict[str, dict[int, int]] = data["lines"]
-        self.opens: dict[str, int] = data["opens"]
-        self.import_lines: dict[str, set[int]] = data["import_lines"]
-        self.module_import_lines: dict[str, dict[str, set[int]]] = data["module_import_lines"]
+        self.test_ids: list[str] = data["test_ids"]
+        self._sets: list[list[int]] = data["sets"]
+        self._masks: dict[int, int] = {}
+        self._flat_lines: dict[str, list[int]] = data["lines"]
+        self._lines: dict[str, dict[int, int]] = {}
+        self.opens = _MaskTable(data["opens"], self)
+        self.classes = _MaskTable(data["classes"], self)
+        self.names = _MaskTable(data["names"], self)
+        self.import_lines: dict[str, list[int]] = data["import_lines"]
+        self.import_names: set[str] = set(data["import_names"])
+        self.import_code: set[tuple[str, str, int]] = {tuple(entry) for entry in data["import_code"]}
+        self._bases: dict[str, list[str]] = data["bases"]
+        self._children: dict[str, list[str]] | None = None
+        self.cpu: list[float] = data["cpu"]
+        self.peak_mb: list[int] = data["peak_mb"]
         self.all_tests = (1 << self.test_count) - 1
 
+    def mask(self, index: int) -> int:
+        mask = self._masks.get(index)
+        if mask is None:
+            flat = self._sets[index]
+            mask = 0
+            for position in range(0, len(flat), 2):
+                first, last = flat[position], flat[position + 1]
+                mask |= ((1 << (last - first + 1)) - 1) << first
+            self._masks[index] = mask
+        return mask
+
+    def _file_lines(self, filename: str) -> dict[int, int]:
+        per_file = self._lines.get(filename)
+        if per_file is None:
+            flat = self._flat_lines.get(filename, [])
+            per_file = {flat[position]: flat[position + 1] for position in range(0, len(flat), 2)}
+            self._lines[filename] = per_file
+        return per_file
+
+    def tests_creating(self, class_key: str) -> int:
+        """Tests that created an object of the class or of any subclass."""
+        if self._children is None:
+            children: dict[str, list[str]] = {}
+            for child, parents in self._bases.items():
+                for parent in parents:
+                    children.setdefault(parent, []).append(child)
+            self._children = children
+        mask = 0
+        seen = set()
+        stack = [class_key]
+        while stack:
+            key = stack.pop()
+            if key in seen:
+                continue
+            seen.add(key)
+            mask |= self.classes.get(key, 0)
+            stack.extend(self._children.get(key, []))
+        return mask
+
     def tests_covering(self, filename: str, lines) -> int:
-        per_file = self.lines.get(filename, {})
+        per_file = self._file_lines(filename)
         mask = 0
         for line in lines:
-            mask |= per_file.get(line, 0)
+            index = per_file.get(line)
+            if index is not None:
+                mask |= self.mask(index)
         return mask
 
     def tests_touching_file(self, filename: str) -> int:
         mask = 0
-        for value in self.lines.get(filename, {}).values():
-            mask |= value
+        for index in set(self._file_lines(filename).values()):
+            mask |= self.mask(index)
         return mask
 
     def executed_at_import(self, filename: str, lines) -> bool:
-        line_set = set(lines)
-        if line_set & self.import_lines.get(filename, set()):
-            return True
-        return any(
-            line_set & per_module.get(filename, set())
-            for per_module in self.module_import_lines.values()
-        )
+        return bool(set(lines) & set(self.import_lines.get(filename, [])))
 
 
 @dataclass
@@ -89,14 +151,26 @@ def analyze(patch_text: str, source_root: Path, coverage: CoverageMap) -> Commit
 def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> FileVerdict:
     path = patch.path
     everything = coverage.all_tests
+    inside = any(
+        candidate.startswith(("sqlglot/", "tests/")) or candidate in RUNNER_CONFIG
+        for candidate in patch.paths
+    )
+    readers = 0
+    for candidate in patch.paths:
+        readers |= coverage.opens.get(candidate, 0)
+    if path.startswith("sqlglotc/"):
+        readers |= coverage.tests_touching_file("tests/test_sqlglotc.py")
+    if not inside and not readers and not path.startswith("sqlglotc/"):
+        # No test imports, runs or opens this file.
+        return FileVerdict(path, "other", 0, "file no test reads")
     if patch.binary:
         return FileVerdict(path, "unknown", everything, "binary patch")
     if not patch.hunks and patch.old_path == patch.new_path:
         return FileVerdict(path, "same", 0, "mode change only")
     if patch.old_path is None or patch.new_path is None or patch.old_path != patch.new_path:
-        if path.startswith(("sqlglot/", "tests/")) or path in RUNNER_CONFIG:
+        if inside:
             return FileVerdict(path, "unknown", everything, "file added, deleted or renamed")
-        return FileVerdict(path, "other", 0, "file outside the package and tests")
+        return FileVerdict(path, "fixture", readers, "read file added, deleted or renamed")
 
     old_file = source_root / path
     try:
@@ -110,10 +184,8 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
 
     if path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):
         return analyze_python(path, old_text, new_text, patch, coverage)
-
-    readers = coverage.opens.get(path, 0)
-    if path.startswith("sqlglotc/"):
-        readers |= coverage.tests_touching_file("tests/test_sqlglotc.py")
+    if old_text == new_text:
+        return FileVerdict(path, "same", 0, "text unchanged", new_text=new_text)
     return FileVerdict(path, "fixture" if readers else "other", readers, new_text=new_text)
 
 
@@ -127,12 +199,85 @@ def analyze_python(
         return FileVerdict(path, "same", 0, "identical bytecode", new_text=new_text)
     if diff.syntax_error:
         return FileVerdict(path, "unknown", everything, "new text does not compile", new_text=new_text)
-    if not diff.function_level_only:
-        return FileVerdict(path, "module", everything, "module or class level change", new_text=new_text)
+    function_changes = [change for change in diff.changed if change.swappable]
+    function_tests, function_note, runs_at_import = _function_candidates(
+        path, old_text, patch, function_changes, coverage
+    )
+    if diff.function_level_only:
+        if runs_at_import:
+            return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
+        kind = "test_function" if path.startswith("tests/") else "function"
+        return FileVerdict(path, kind, function_tests, function_note, function_changes, new_text)
 
+    if runs_at_import or diff.unmatched:
+        return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
+    try:
+        bindings = changed_bindings(old_text, new_text)
+    except SyntaxError as error:
+        return FileVerdict(path, "module", everything, f"cannot compare statements: {error}", new_text=new_text)
+    tests, notes = _binding_candidates(path, bindings, coverage)
+    return FileVerdict(
+        path, "module", tests | function_tests, f"{notes}; {function_note}", function_changes, new_text
+    )
+
+
+def _module_name(path: str) -> str:
+    module = path[: -len(".py")].replace("/", ".")
+    return module[: -len(".__init__")] if module.endswith(".__init__") else module
+
+
+def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int, str]:
+    """Tests that can see a changed module-level or class-level binding."""
+    everything = coverage.all_tests
+    if not bindings:
+        return everything, "no binding found for a module level change"
+    module = _module_name(path)
+    tests = 0
+    notes = []
+    for binding in bindings:
+        name = binding.name
+        if binding.kind == "other":
+            return everything, f"unreadable statement near {'.'.join(binding.owner) or 'module'}"
+        if binding.kind == "doc":
+            notes.append(f"{'.'.join(binding.owner)}.__doc__")
+            continue
+        readers = coverage.names.get(name, 0)
+        read_at_import = name in coverage.import_names
+        body = 0
+        if binding.old_def_lines:
+            first, last = binding.old_def_lines
+            body = coverage.tests_covering(path, range(first, last + 1))
+        if not binding.owner:
+            if read_at_import and binding.kind != "def":
+                return everything, f"module global {name} is read at import"
+            tests |= readers | body
+            notes.append(f"{name}: readers")
+            continue
+        owner_key = f"{module}:{'.'.join(binding.owner)}"
+        creators = coverage.tests_creating(owner_key)
+        if binding.kind == "class":
+            creators |= coverage.tests_creating(f"{owner_key}.{name}")
+        if not creators:
+            if not readers:
+                return everything, f"{owner_key}.{name}: no creators and no readers"
+            tests |= readers | body
+            notes.append(f"{owner_key}.{name}: readers, class never created")
+            continue
+        if read_at_import or not readers or binding.added or binding.kind == "class":
+            tests |= creators | body
+            notes.append(f"{owner_key}.{name}: all creators")
+        else:
+            tests |= (creators & readers) | body
+            notes.append(f"{owner_key}.{name}: creators that read it")
+    return tests, "; ".join(notes)
+
+
+def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int, str, bool]:
+    if not changes:
+        return 0, "", False
     changed_lines = patch.changed_old_lines()
     own_lines: set[int] = set()
-    for change in diff.changed:
+    for change in changes:
         nested = {
             line
             for const in change.old.co_consts
@@ -146,8 +291,10 @@ def analyze_python(
     relevant = (changed_lines & own_lines) or changed_lines
     spans = enclosing_spans(statement_spans(old_text), relevant)
     span_lines = {line for first, last in spans for line in range(first, last + 1)}
-    if coverage.executed_at_import(path, span_lines):
-        return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
-    tests = coverage.tests_covering(path, span_lines)
-    kind = "test_function" if path.startswith("tests/") else "function"
-    return FileVerdict(path, kind, tests, f"spans {spans}", diff.changed, new_text)
+    # A changed function that already ran while sqlglot imported has left
+    # objects built by its old code, which swapping its code cannot reach.
+    runs_at_import = any(
+        (path, change.old.co_qualname, change.old.co_firstlineno) in coverage.import_code
+        for change in changes
+    )
+    return coverage.tests_covering(path, span_lines), f"spans {spans}", runs_at_import

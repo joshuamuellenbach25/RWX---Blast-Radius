@@ -36,6 +36,9 @@ class FileDiff:
     syntax_error: bool = False
     changed: list[ChangedCode] = field(default_factory=list)
     unmatched: list[tuple] = field(default_factory=list)  # code objects added or removed
+    # Enclosing functions of changed nested code: a closure made after the
+    # swap is built from its parent's constants, so the parent swaps too.
+    ancestors: list[ChangedCode] = field(default_factory=list)
 
     @property
     def same_behavior(self) -> bool:
@@ -47,6 +50,7 @@ class FileDiff:
             not self.syntax_error
             and not self.unmatched
             and all(change.swappable for change in self.changed)
+            and all(change.swappable for change in self.ancestors)
         )
 
 
@@ -106,22 +110,26 @@ def fingerprint(code: CodeType) -> tuple:
     )
 
 
-def code_tree(code: CodeType) -> dict[tuple, CodeType]:
+def code_tree(code: CodeType, parents: dict | None = None) -> dict[tuple, CodeType]:
     """Every code object under `code`, keyed by its qualname and its position
-    among siblings with the same qualname."""
+    among siblings with the same qualname. Fills `parents` (key -> parent key)
+    when given."""
     tree: dict[tuple, CodeType] = {}
 
-    def visit(node: CodeType) -> None:
+    def visit(node: CodeType, parent_key) -> None:
         base = node.co_qualname
         index = 0
         while (base, index) in tree:
             index += 1
-        tree[(base, index)] = node
+        key = (base, index)
+        tree[key] = node
+        if parents is not None:
+            parents[key] = parent_key
         for const in node.co_consts:
             if isinstance(const, CodeType):
-                visit(const)
+                visit(const, key)
 
-    visit(code)
+    visit(code, None)
     return tree
 
 
@@ -135,7 +143,8 @@ def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
         new_code = compile_text(new_text, filename)
     except (SyntaxError, ValueError):
         return FileDiff(syntax_error=True)
-    old_tree = code_tree(old_code)
+    parents: dict = {}
+    old_tree = code_tree(old_code, parents)
     new_tree = code_tree(new_code)
     result = FileDiff()
     for key in old_tree.keys() | new_tree.keys():
@@ -145,7 +154,139 @@ def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
         old_node, new_node = old_tree[key], new_tree[key]
         if fingerprint(old_node) != fingerprint(new_node):
             result.changed.append(ChangedCode(key, old_node, new_node))
+    changed_keys = {change.path for change in result.changed}
+    ancestor_keys: set = set()
+    for change in result.changed:
+        parent = parents.get(change.path)
+        while parent is not None and old_tree[parent].co_flags & inspect.CO_OPTIMIZED:
+            if parent not in changed_keys:
+                ancestor_keys.add(parent)
+            parent = parents.get(parent)
+    for key in sorted(ancestor_keys):
+        if key in new_tree:
+            result.ancestors.append(ChangedCode(key, old_tree[key], new_tree[key]))
+        else:
+            result.unmatched.append(key)
     return result
+
+
+@dataclass
+class Binding:
+    """A name that a changed module-level or class-level statement binds."""
+
+    owner: tuple[str, ...]  # enclosing class names, () for module level
+    name: str
+    kind: str  # assign, def, class, import, doc, other
+    old_def_lines: tuple[int, int] | None = None  # body lines of the old def
+    added: bool = False  # the name exists only in the new text
+
+
+def _signature_key(node: ast.stmt) -> tuple:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parts = [ast.dump(item) for item in node.decorator_list]
+        parts.append(ast.dump(node.args))
+        parts.append(ast.dump(node.returns) if node.returns else "")
+        parts.extend(ast.dump(item) for item in getattr(node, "type_params", []))
+        return ("def", type(node).__name__, node.name, tuple(parts))
+    if isinstance(node, ast.ClassDef):
+        parts = [ast.dump(item) for item in (*node.bases, *node.keywords, *node.decorator_list)]
+        parts.extend(ast.dump(item) for item in getattr(node, "type_params", []))
+        return ("class", node.name, tuple(parts))
+    return ("stmt", ast.dump(node))
+
+
+def _base_name(node: ast.AST) -> str | None:
+    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Call, ast.Starred)):
+        node = node.func if isinstance(node, ast.Call) else node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _bound_names(node: ast.stmt) -> list[tuple[str, str]]:
+    """(name, kind) pairs a statement binds or mutates; kind "other" when it
+    cannot be read."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [(node.name, "def")]
+    if isinstance(node, ast.ClassDef):
+        return [(node.name, "class")]
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return [((alias.asname or alias.name).split(".")[0], "import") for alias in node.names]
+    targets: list[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+        targets = [node.target]
+    elif isinstance(node, ast.Delete):
+        targets = list(node.targets)
+    elif isinstance(node, ast.Expr):
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return [("__doc__", "doc")]
+        base = _base_name(node.value)
+        return [(base, "assign")] if base else [("?", "other")]
+    elif isinstance(node, ast.Pass):
+        return []
+    elif isinstance(node, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+        found: list[tuple[str, str]] = []
+        if isinstance(node, ast.For):
+            targets = [node.target]
+        for name in ("body", "orelse", "finalbody"):
+            for child in getattr(node, name, []) or []:
+                found.extend(_bound_names(child))
+        for handler in getattr(node, "handlers", []) or []:
+            for child in handler.body:
+                found.extend(_bound_names(child))
+        for target in targets:
+            for element in ast.walk(target):
+                if isinstance(element, ast.Name):
+                    found.append((element.id, "assign"))
+        return found or [("?", "other")]
+    else:
+        return [("?", "other")]
+    found = []
+    for target in targets:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                base = _base_name(element)
+                found.append((base, "assign") if base else ("?", "other"))
+        else:
+            base = _base_name(target)
+            found.append((base, "assign") if base else ("?", "other"))
+    return found
+
+
+def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
+    """Names bound by module-level and class-level statements that differ.
+    Function bodies are left out: bytecode comparison covers them."""
+    import difflib
+
+    def compare(old_body: list, new_body: list, owner: tuple[str, ...]) -> list[Binding]:
+        old_keys = [_signature_key(node) for node in old_body]
+        new_keys = [_signature_key(node) for node in new_body]
+        matcher = difflib.SequenceMatcher(a=old_keys, b=new_keys, autojunk=False)
+        found: list[Binding] = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            olds, news = old_body[i1:i2], new_body[j1:j2]
+            if tag == "equal":
+                for old_node, new_node in zip(olds, news):
+                    if isinstance(old_node, ast.ClassDef):
+                        found.extend(compare(old_node.body, new_node.body, owner + (old_node.name,)))
+                continue
+            old_names = {}
+            for node in olds:
+                for name, kind in _bound_names(node):
+                    lines = None
+                    if kind == "def":
+                        lines = (node.body[0].lineno, node.end_lineno or node.body[0].lineno)
+                    old_names.setdefault(name, (kind, lines))
+            new_names = {}
+            for node in news:
+                for name, kind in _bound_names(node):
+                    new_names.setdefault(name, kind)
+            for name in old_names.keys() | new_names.keys():
+                kind, lines = old_names.get(name, (new_names.get(name), None))
+                found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
+        return found
+
+    return compare(ast.parse(old_text).body, ast.parse(new_text).body, ())
 
 
 def statement_spans(source: str) -> list[tuple[int, int]]:
