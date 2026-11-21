@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,55 @@ RUNNER_CONFIG = {
 # The largest sqlglot module is about 0.4 MB; a patched module past this size
 # lists every test instead of risking the container's memory.
 MAX_PYTHON_CHARS = 2_000_000
+
+# The tests run with the checkout's root on sys.path, so a module there takes
+# its name from whatever module was imported under that name: a stdlib module,
+# or one the code imports (an optional import that failed then succeeds).
+_IMPORT_LINE = re.compile(r"^[ \t]*(?:from[ \t]+([A-Za-z_]\w*)|import[ \t]+([^\n#;]+))", re.M)
+_checkout_imports: dict[Path, set[str]] = {}
+
+
+def _imported_names(source_root: Path) -> set[str]:
+    """The top-level module names that the package and the tests import."""
+    names = _checkout_imports.get(source_root)
+    if names is None:
+        names = set()
+        for folder in ("sqlglot", "tests"):
+            for file in (source_root / folder).rglob("*.py"):
+                try:
+                    text = file.read_text("utf-8", errors="replace")
+                except OSError:
+                    continue
+                for match in _IMPORT_LINE.finditer(text):
+                    if match.group(1):
+                        names.add(match.group(1))
+                        continue
+                    for part in match.group(2).split(","):
+                        words = part.replace("(", " ").replace(")", " ").split()
+                        if words:
+                            names.add(words[0].partition(".")[0])
+        _checkout_imports[source_root] = names
+    return names
+
+
+def _shadowed_module(paths, source_root: Path) -> str | None:
+    """The import name that a file at the checkout's root takes over, if any:
+    X for X.py, X/__init__.py or an extension module X.*.so or X.pyd when X
+    is a stdlib module or one the code imports; for any other file in a
+    folder X there (a namespace package) when the code imports X."""
+    for path in paths:
+        head, slash, _ = path.partition("/")
+        if slash:
+            regular = path == f"{head}/__init__.py"
+            name = head
+        else:
+            regular = path.endswith((".py", ".so", ".pyd"))
+            name = path.partition(".")[0] if regular else ""
+        if not name.isidentifier() or name in ("sqlglot", "tests", "sqlglotc"):
+            continue
+        if name in _imported_names(source_root) or (regular and name in sys.stdlib_module_names):
+            return name
+    return None
 
 
 class _MaskTable:
@@ -341,6 +391,10 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
     # A deleted or renamed file stays in place for a local run, so a commit
     # with one cannot be checked by running its tests here.
     moved = patch.old_path is not None and patch.new_path != patch.old_path
+    if not inside:
+        shadowed = _shadowed_module(patch.paths, source_root)
+        if shadowed:
+            return FileVerdict(path, "unknown", everything, f"a file at the checkout's root takes the import name {shadowed}")
     if not inside and not readers and not path.startswith("sqlglotc/"):
         # No test imports, runs or opens this file.
         if moved:
