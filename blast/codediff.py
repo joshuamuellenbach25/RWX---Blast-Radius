@@ -410,8 +410,8 @@ def _operations(nodes: list) -> Counter:
             elif isinstance(sub, ast.Attribute):
                 found[f"Attribute.{ast.unparse(sub)}"] += 1
             elif isinstance(sub, ast.Subscript):
-                key = ast.dump(sub.slice) if isinstance(sub.slice, ast.Constant) else "expression"
-                found[f"Subscript.{key}"] += 1
+                # The receiver counts too: t.Union[...] made int[...] raises.
+                found[f"Subscript.{ast.unparse(sub)}"] += 1
             pending.extend(ast.iter_child_nodes(sub))
     return found
 
