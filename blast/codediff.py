@@ -607,8 +607,12 @@ def _operations(nodes: list) -> Counter:
     import (lambda bodies run later; compound statements are not read)."""
     found: Counter = Counter()
     for node in nodes:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr, ast.Delete)):
             parts = _evaluated_parts(node)
+            if isinstance(node, ast.Delete):
+                # A name deleted at import is gone for every later read of
+                # it (del HINT_START before KEYWORDS reads it).
+                found["Delete"] += 1
             # A decorator is called with what it decorates; a new one can
             # raise when the class or module is built (@seq_get needs two
             # arguments), one already applied here cannot.
@@ -693,7 +697,7 @@ def _operations(nodes: list) -> Counter:
 def _binds(node: ast.stmt) -> set[str]:
     """Names a statement binds when it runs: an annotation with no value
     binds nothing."""
-    if isinstance(node, ast.AnnAssign) and node.value is None:
+    if isinstance(node, ast.AnnAssign) and node.value is None or isinstance(node, ast.Delete):
         return set()
     return {name for name, _ in _bound_names(node)}
 
