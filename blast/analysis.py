@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.machinery
 import inspect
 import json
 import re
@@ -34,6 +35,9 @@ MAX_PYTHON_CHARS = 2_000_000
 # its name from whatever module was imported under that name: a stdlib module,
 # or one the code imports (an optional import that failed then succeeds).
 _IMPORT_LINE = re.compile(r"^[ \t]*(?:from[ \t]+([A-Za-z_]\w*)|import[ \t]+([^\n#;]+))", re.M)
+# What may follow a module's name in its file name (duckdb.backup.py is no
+# module duckdb): this interpreter's suffixes, plus plain extensions.
+_MODULE_SUFFIXES = frozenset(importlib.machinery.all_suffixes()) | {".so", ".pyd"}
 _checkout_imports: dict[Path, set[str]] = {}
 
 
@@ -71,8 +75,9 @@ def _shadowed_module(paths, source_root: Path) -> str | None:
             regular = path == f"{head}/__init__.py"
             name = head
         else:
-            regular = path.endswith((".py", ".so", ".pyd"))
-            name = path.partition(".")[0] if regular else ""
+            stem = path.partition(".")[0]
+            regular = path[len(stem):] in _MODULE_SUFFIXES
+            name = stem if regular else ""
         if not name.isidentifier() or name in ("sqlglot", "tests", "sqlglotc"):
             continue
         if name in _imported_names(source_root) or (regular and name in sys.stdlib_module_names):
