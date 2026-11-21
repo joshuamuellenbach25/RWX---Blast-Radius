@@ -176,7 +176,32 @@ def analyze(patch_text: str, source_root: Path, coverage: CoverageMap) -> Commit
         return CommitAnalysis([FileVerdict("?", "unknown", coverage.all_tests, str(error))])
     if not file_patches:
         return CommitAnalysis([FileVerdict("?", "unknown", coverage.all_tests, "no files in patch")])
-    return CommitAnalysis([analyze_file(patch, source_root, coverage) for patch in file_patches])
+    try:
+        top = {entry.name for entry in source_root.iterdir()}
+    except OSError:
+        top = set()
+    verdicts = []
+    for patch in file_patches:
+        if _strip_unknown_prefix(patch, top):
+            verdicts.append(analyze_file(patch, source_root, coverage))
+        else:
+            verdicts.append(FileVerdict(patch.path, "unknown", coverage.all_tests, "path not in the checkout"))
+    return CommitAnalysis(verdicts)
+
+
+def _strip_unknown_prefix(patch: FilePatch, top: set[str]) -> bool:
+    """Strips a path prefix other than a/ and b/ (old/ and new/, say): a
+    first folder the pinned checkout lacks in front of one it has. False
+    when a changed, deleted or renamed file still starts outside the
+    checkout, so its path cannot be read."""
+    for attribute in ("old_path", "new_path"):
+        path = getattr(patch, attribute)
+        if path is None:
+            continue
+        head, _, rest = path.partition("/")
+        if head not in top and rest.partition("/")[0] in top:
+            setattr(patch, attribute, rest)
+    return patch.old_path is None or patch.old_path.partition("/")[0] in top
 
 
 def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> FileVerdict:

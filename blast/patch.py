@@ -83,9 +83,18 @@ def parse_patch(text: str) -> list[FilePatch]:
         line = lines[index]
         if line.startswith("diff --git "):
             match = re.match(r"^diff --git a/(.+) b/(.+)$", line)
-            if not match:
-                raise PatchError(f"unreadable diff header: {line!r}")
-            current = FilePatch(old_path=match.group(1), new_path=match.group(2))
+            if match:
+                old_path, new_path = match.group(1), match.group(2)
+            else:
+                # Other prefixes (old/ and new/) or none: both paths have one
+                # length unless the file is renamed, and a rename names its
+                # paths again on rename lines. The analysis strips the prefix.
+                rest = line[len("diff --git "):]
+                half = len(rest) // 2
+                if len(rest) % 2 == 0 or rest[half] != " ":
+                    raise PatchError(f"unreadable diff header: {line!r}")
+                old_path, new_path = rest[:half], rest[half + 1:]
+            current = FilePatch(old_path=old_path, new_path=new_path)
             patches.append(current)
             index += 1
             continue
