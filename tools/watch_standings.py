@@ -99,6 +99,8 @@ def main() -> None:
             with history.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps(state) + "\n")
         write_state(state, options.output)
+        # One line per poll, so the log of a detached run shows it is alive.
+        print(f"{state['checked_at']} {state['status']} leader {state.get('leader_score')} ours {state.get('our_score')}", flush=True)
         previous = state
         if options.once or state.get("closed"):
             break
