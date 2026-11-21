@@ -214,17 +214,32 @@ def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
     except (SyntaxError, ValueError):
         return FileDiff(syntax_error=True)
     parents: dict = {}
+    new_parents: dict = {}
     old_tree = code_tree(old_code, parents)
-    new_tree = code_tree(new_code)
+    new_tree = code_tree(new_code, new_parents)
     result = FileDiff()
+    added_or_removed = []
     for key in old_tree.keys() | new_tree.keys():
         if key not in old_tree or key not in new_tree:
-            result.unmatched.append(key)
+            added_or_removed.append(key)
             continue
         old_node, new_node = old_tree[key], new_tree[key]
         if not same_raw(old_node, new_node) and fingerprint(old_node) != fingerprint(new_node):
             result.changed.append(ChangedCode(key, old_node, new_node))
     changed_keys = {change.path for change in result.changed}
+    for key in added_or_removed:
+        # Code added or removed inside a function that changed runs only when
+        # that function runs, and its new code carries the nested code: the
+        # function's change covers it. Anything else runs at import.
+        tree, parent_of = (new_tree, new_parents) if key in new_tree else (old_tree, parents)
+        parent = parent_of.get(key)
+        while parent is not None and tree[parent].co_flags & inspect.CO_OPTIMIZED and parent not in changed_keys:
+            parent = parent_of.get(parent)
+        # The covering parent must be a function: a new method's parent is
+        # the class body and a new def's is the module, both changed too.
+        covered = parent is not None and parent in changed_keys and bool(tree[parent].co_flags & inspect.CO_OPTIMIZED)
+        if not covered:
+            result.unmatched.append(key)
     ancestor_keys: set = set()
     for change in result.changed:
         parent = parents.get(change.path)
