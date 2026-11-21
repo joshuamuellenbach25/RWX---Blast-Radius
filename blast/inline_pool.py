@@ -23,6 +23,9 @@ class InlineProcessPool:
         # so a call that it refuses is refused here too.
         if max_workers is not None and max_workers <= 0:
             raise ValueError("max_workers must be greater than 0")
+        # The real pool asks a given context for its start method at once, so
+        # one that is not a context (the string "spawn") fails here too.
+        start_method = mp_context.get_start_method(allow_none=False) if mp_context is not None else None
         if initializer is not None and not callable(initializer):
             raise TypeError("initializer must be a callable")
         if max_tasks_per_child is not None:
@@ -30,7 +33,7 @@ class InlineProcessPool:
                 raise TypeError("max_tasks_per_child must be an integer")
             if max_tasks_per_child <= 0:
                 raise ValueError("max_tasks_per_child must be >= 1")
-            if mp_context is not None and mp_context.get_start_method(allow_none=False) == "fork":
+            if start_method == "fork":
                 raise ValueError(
                     "max_tasks_per_child is incompatible with the 'fork' multiprocessing start method;"
                     " supply a different mp_context."
