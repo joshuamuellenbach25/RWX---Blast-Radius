@@ -43,46 +43,76 @@ def _limit(test: dict) -> float:
     return 3.0 + 6.0 * test["seconds"]
 
 
-def _body_runs(name: str, filename: str, text: str) -> bool:
-    """Runs a module body in a fresh module object in a forked child, as an
-    import of the module would; True when it raises nothing."""
+RAISED = 3  # exit code of a body run that raised
+
+
+def _bodies_run(bodies: list) -> int:
+    """Runs module bodies in order in fresh module objects in one forked
+    child, as an import of each would, each installed (in sys.modules and on
+    its package) before the next runs. 0 when all ran, RAISED when one
+    raised; anything else (the 10 s alarm, a signal) is no answer."""
     child = os.fork()
     if child == 0:
-        code = 3
+        code = RAISED
         try:
             # A body that never finishes must not outlive its job: the
             # alarm's default action ends this child after 10 s.
             signal.alarm(10)
-            module = types.ModuleType(name)
-            module.__file__ = filename
-            module.__package__ = name if filename.endswith("__init__.py") else name.rpartition(".")[0]
-            sys.modules[name] = module
-            exec(compile(text, filename, "exec"), module.__dict__)
+            for name, filename, text in bodies:
+                module = types.ModuleType(name)
+                module.__file__ = filename
+                module.__package__ = name if filename.endswith("__init__.py") else name.rpartition(".")[0]
+                sys.modules[name] = module
+                parent, _, attribute = name.rpartition(".")
+                if parent in sys.modules:
+                    setattr(sys.modules[parent], attribute, module)
+                exec(compile(text, filename, "exec"), module.__dict__)
             code = 0
         except BaseException:  # SystemExit too: the import would fail
             pass
         finally:
             os._exit(code)
     _, status = os.waitpid(child, 0)
-    return os.waitstatus_to_exitcode(status) == 0
+    return os.waitstatus_to_exitcode(status)
+
+
+def _dependency_order(sources: list) -> list:
+    """The changed modules, a module whose new text names another changed
+    module after that one (in a cycle, the first left)."""
+    names = {name for name, _, _ in sources}
+    done: set[str] = set()
+    ordered, pending = [], list(sources)
+    while pending:
+        pick = next(
+            (item for item in pending if all(other in done or other == item[0] or other not in item[2] for other in names)),
+            pending[0],
+        )
+        ordered.append(pick)
+        done.add(pick[0])
+        pending.remove(pick)
+    return ordered
 
 
 def _import_failure(sources: list, root: str = "/sqlglot") -> str:
-    """The changed module whose new body raises where its old body ran clean,
-    each run as an import would (a metaclass reading a table built with an
-    empty key raises IndexError at import, which no static reading shows);
-    "" when there is none. A module whose old body also raises when run
-    again is no evidence either way."""
-    for name, path, new_text in sources:
+    """The changed modules, when their new bodies raise together where their
+    old bodies ran clean, each run as an import would (a metaclass reading a
+    table built with an empty key raises IndexError at import, which no
+    static reading shows); "" otherwise. All of a commit's changed modules
+    run together, so one that reads a name another adds sees it. Old bodies
+    that also raise when run again, or a run that times out, are no
+    evidence either way."""
+    olds, news = [], []
+    for name, path, new_text in _dependency_order(sources):
         filename = os.path.join(root, path)
         try:
             with open(filename, encoding="utf-8") as handle:
-                old_text = handle.read()
+                olds.append((name, filename, handle.read()))
         except OSError:
-            continue
-        if _body_runs(name, filename, old_text) and not _body_runs(name, filename, new_text):
-            return name
-    return ""
+            return ""
+        news.append((name, filename, new_text))
+    if not news or _bodies_run(olds) != 0 or _bodies_run(news) != RAISED:
+        return ""
+    return ", ".join(name for name, _, _ in news)
 
 
 def _run_job(job: Job, index) -> dict:

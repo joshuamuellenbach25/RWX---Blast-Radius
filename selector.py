@@ -140,10 +140,9 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     if not verifiable:
         # A changed module body can raise at import where no static reading
         # shows it (a metaclass indexing a table key made ""): the worker runs
-        # the old and the new body, and a new failure lists every test. Only
-        # for a commit whose one changed package module is this one: a body
-        # reading a name another changed module adds would raise against
-        # that module's old text on disk.
+        # the old and the new bodies of every changed package module
+        # together, so one that reads a name another adds sees it, and a new
+        # failure lists every test. Without every new text there is no check.
         package_changes = [
             verdict for verdict in analysis.files
             if verdict.path.startswith("sqlglot/") and verdict.path.endswith(".py") and verdict.kind != "same"
@@ -151,9 +150,13 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         sources = [
             (verdict.path[: -len(".py")].replace("/", ".").removesuffix(".__init__"), verdict.path, verdict.new_text)
             for verdict in package_changes
-            if verdict.kind == "module" and verdict.new_text is not None
+            if verdict.new_text is not None
         ]
-        if len(package_changes) == 1 and sources and len(kept | candidates) < len(by_number):
+        if (
+            any(verdict.kind == "module" for verdict in package_changes)
+            and len(sources) == len(package_changes)
+            and len(kept | candidates) < len(by_number)
+        ):
             jobs.append(Job(commit=commit, tests=[], sources=sources, modules={name for name, _, _ in sources}, value=float("inf")))
         return kept | candidates, set(), set()
     # A local run cannot vouch for a test that starts its own process, so such
