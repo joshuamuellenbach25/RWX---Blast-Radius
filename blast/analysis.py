@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from blast.codediff import changed_bindings, diff_python, enclosing_spans, statement_spans
+from blast.codediff import changed_bindings, diff_python, enclosing_spans, parse_cached, statement_spans
 from blast.patch import FilePatch, PatchError, apply_file_patch, parse_patch
 
 # tests/test_typing.py compares the bytecode of the annotators defined in
@@ -330,20 +330,44 @@ def _test_files_loading(source_root: Path, path: str) -> list[str]:
     return sorted(rel for rel in _files_loading(source_root, path) if rel.startswith("tests/"))
 
 
+IMPORT_GRAPH_PATH = Path(__file__).resolve().parent.parent / "data" / "imports.json"
+
+
+def build_import_graph(source_root: Path) -> dict[str, set[str]]:
+    """file -> the sqlglot and test files it imports as it loads, for every
+    .py file under sqlglot/ and tests/ (tools/build_imports.py stores it)."""
+    tests_dir = source_root / "tests"
+    if not tests_dir.is_dir():
+        raise FileNotFoundError(f"no test folder at {tests_dir}")
+    graph: dict[str, set[str]] = {}
+    for folder in ("sqlglot", "tests"):
+        for file in sorted((source_root / folder).rglob("*.py")):
+            rel = file.relative_to(source_root).as_posix()
+            graph[rel] = _top_level_imports(source_root, rel)
+    return graph
+
+
+def _stored_import_graph() -> dict[str, set[str]] | None:
+    """The graph built from the pinned sqlglot when the map was made: reading
+    250 files costs about half a second of CPU each run."""
+    try:
+        data = json.loads(IMPORT_GRAPH_PATH.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if data.get("format") != "blast-radius-imports/1":
+        return None
+    return {rel: set(imports) for rel, imports in data["graph"].items()}
+
+
 def _files_loading(source_root: Path, path: str) -> set[str]:
     """Every sqlglot and test file that runs `path` while it loads, through
     any chain of top-level imports, `path` included: if `path` raises on
     import, each of them fails to load too."""
     graph = _import_graphs.get(source_root)
     if graph is None:
-        tests_dir = source_root / "tests"
-        if not tests_dir.is_dir():
-            raise FileNotFoundError(f"no test folder at {tests_dir}")
-        graph = {}
-        for folder in ("sqlglot", "tests"):
-            for file in sorted((source_root / folder).rglob("*.py")):
-                rel = file.relative_to(source_root).as_posix()
-                graph[rel] = _top_level_imports(source_root, rel)
+        graph = _stored_import_graph()
+        if graph is None or path not in graph:
+            graph = build_import_graph(source_root)
         _import_graphs[source_root] = graph
     importers: dict[str, set[str]] = {}
     for rel, imports in graph.items():
@@ -466,7 +490,7 @@ def _inert_old_lines(patch, old_text: str) -> set[int]:
     ):
         return set()
     inert: set[int] = set()
-    for node in ast.walk(ast.parse(old_text)):
+    for node in ast.walk(parse_cached(old_text)):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
             inert.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
     return inert
@@ -573,7 +597,7 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         )
         if own and (reshaped or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
-                tree = ast.parse(old_text)
+                tree = parse_cached(old_text)
             fallback |= coverage.tests_covering(path, _entry_lines(tree, change.old.co_firstlineno))
         # A lambda that shares its line with code run at import is invisible
         # to the map: import-time lines are left out of every test, and a

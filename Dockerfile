@@ -15,6 +15,7 @@ RUN python /opt/fetch_sqlglot.py /sqlglot \
 
 COPY blast /app/blast
 COPY data/map.json /app/data/map.json
+COPY data/imports.json /app/data/imports.json
 COPY selector.py /app/selector.py
 RUN python -m compileall -q /app && chmod -R a+rX /app
 

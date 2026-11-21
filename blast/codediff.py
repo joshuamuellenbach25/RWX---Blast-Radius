@@ -175,6 +175,27 @@ def compile_text(text: str, filename: str) -> CodeType:
     return compile(text, filename, "exec", dont_inherit=True, optimize=0)
 
 
+# Many commits patch the same pristine file: compile and parse it once.
+# Code objects and syntax trees are only read, never changed.
+_compiled: dict[tuple[str, str], CodeType] = {}
+_parsed: dict[str, ast.Module] = {}
+
+
+def compile_pristine(text: str, filename: str) -> CodeType:
+    key = (filename, text)
+    code = _compiled.get(key)
+    if code is None:
+        code = _compiled[key] = compile_text(text, filename)
+    return code
+
+
+def parse_cached(text: str) -> ast.Module:
+    tree = _parsed.get(text)
+    if tree is None:
+        tree = _parsed[text] = ast.parse(text)
+    return tree
+
+
 CODING_DECLARATION = re.compile(r"^[ \t\f]*#.*?coding[:=]")
 
 
@@ -187,7 +208,7 @@ def _declared_coding(text: str) -> list[str]:
 def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
     if _declared_coding(old_text) != _declared_coding(new_text):
         return FileDiff(syntax_error=True)
-    old_code = compile_text(old_text, filename)
+    old_code = compile_pristine(old_text, filename)
     try:
         new_code = compile_text(new_text, filename)
     except (SyntaxError, ValueError):
@@ -452,14 +473,14 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
         return found
 
-    return compare(ast.parse(old_text).body, ast.parse(new_text).body, (), set())
+    return compare(parse_cached(old_text).body, ast.parse(new_text).body, (), set())
 
 
 def statement_spans(source: str) -> list[tuple[int, int]]:
     """(first, last) line of every statement; for a compound statement only
     its header, since its body statements are listed on their own."""
     spans: list[tuple[int, int]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(parse_cached(source)):
         if isinstance(node, ast.Lambda):
             # A lambda body runs when the lambda is called, not where the
             # statement holding it runs, so it is its own unit.
