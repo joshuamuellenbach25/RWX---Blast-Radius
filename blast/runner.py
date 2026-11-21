@@ -139,9 +139,13 @@ def unittest_id(test: dict) -> str:
     return f"{module}.{class_name}.{method}"
 
 
-def run_tests(tests: list[dict], limits_by_number: dict[int, float]) -> tuple[set[int], dict]:
+def run_tests(
+    tests: list[dict], limits_by_number: dict[int, float], stop_at_first_failure: bool = False
+) -> tuple[set[int], dict]:
     """Run the given tests (tests.json entries) here. Returns the numbers
-    that failed, errored, timed out or could not be loaded, and a summary."""
+    that failed, errored, timed out or could not be loaded, and a summary.
+    With stop_at_first_failure the run ends at the first failing test, and
+    the summary's "complete" is False when tests were left unrun."""
     import importlib
 
     from blast import inline_pool
@@ -164,6 +168,7 @@ def run_tests(tests: list[dict], limits_by_number: dict[int, float]) -> tuple[se
     inline_pool.install(modules)
     previous = signal.signal(signal.SIGALRM, _on_alarm)
     recorder = _Recorder(limits)
+    recorder.failfast = stop_at_first_failure
     try:
         suite.run(recorder)
     finally:
@@ -176,7 +181,12 @@ def run_tests(tests: list[dict], limits_by_number: dict[int, float]) -> tuple[se
         for test_id, test in by_unittest_id.items():
             if test_id.startswith(class_path + "."):
                 failed.add(test["number"])
-    summary = {"run": recorder.testsRun, "failures": len(recorder.failures), "errors": len(recorder.errors)}
+    summary = {
+        "run": recorder.testsRun,
+        "failures": len(recorder.failures),
+        "errors": len(recorder.errors),
+        "complete": recorder.testsRun >= len(tests) and not recorder.shouldStop,
+    }
     return failed, summary
 
 

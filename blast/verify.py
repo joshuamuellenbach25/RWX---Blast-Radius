@@ -53,7 +53,9 @@ def _run_job(job: Job, index) -> dict:
     if missing:
         return {"commit": job.commit, "ok": False, "reason": f"no live function for {missing[:3]}"}
     limits = {test["number"]: _limit(test) for test in job.tests}
-    failed, summary = runner.run_tests(job.tests, limits)
+    # The first failure already decides that the commit's candidates get
+    # listed, so the rest of the run would only cost CPU seconds.
+    failed, summary = runner.run_tests(job.tests, limits, stop_at_first_failure=True)
     return {"commit": job.commit, "ok": True, "failed": sorted(failed), "swapped": swapped, "summary": summary}
 
 

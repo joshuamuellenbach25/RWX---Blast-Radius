@@ -157,8 +157,16 @@ def main() -> None:
         result = results.get(commit)
         if cheap and result and result.get("ok"):
             failed = set(result["failed"]) & cheap
-            chosen = kept | failed | (slow if failed else set())
-            how = f"ran {len(cheap)}, {len(failed)} failed"
+            complete = bool(result.get("summary", {}).get("complete"))
+            if failed:
+                # A run that stopped at its first failure left tests unrun,
+                # so every candidate is listed.
+                chosen = kept | (failed if complete else cheap) | slow
+            elif complete:
+                chosen = kept
+            else:
+                chosen = kept | cheap | slow
+            how = f"ran {result.get('summary', {}).get('run')} of {len(cheap)}, {len(failed)} failed"
         else:
             chosen = kept | cheap | slow
             how = "not run" if not cheap else f"no result {result.get('reason') if result else ''}"
