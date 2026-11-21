@@ -344,6 +344,7 @@ def _calls_code(node: ast.stmt) -> bool:
     return any(isinstance(sub, ast.Call) for part in parts for sub in ast.walk(part))
 
 
+DUNDER = re.compile(r"__\w+__")
 ALWAYS_BOUND = set(dir(builtins)) | {
     "__file__", "__path__", "__spec__", "__loader__", "__package__", "__builtins__", "__module__", "__qualname__",
 }
@@ -389,6 +390,16 @@ def _unbound_load(node: ast.stmt, bound: set[str]) -> str | None:
     return None
 
 
+UNHASHABLE = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
+
+
+def _kind(node: ast.AST) -> str:
+    """A node's syntax type; for a constant, the constant's own type."""
+    if isinstance(node, ast.Constant):
+        return f"Constant.{type(node.value).__name__}"
+    return type(node).__name__
+
+
 def _operations(nodes: list) -> Counter:
     """Operations that can raise, in what simple statements evaluate at
     import (lambda bodies run later; compound statements are not read)."""
@@ -409,18 +420,25 @@ def _operations(nodes: list) -> Counter:
                 continue
             # Lookups count by their whole expression: TokenType.BEGIN made
             # TokenType.BEIGN, or str.BEGIN, keeps the number of lookups and
-            # raises.
-            if isinstance(sub, (ast.BinOp, ast.UnaryOp)):
-                found[f"{type(sub).__name__}.{type(sub.op).__name__}"] += 1
-            elif isinstance(sub, (ast.List, ast.Set, ast.Dict, ast.Tuple)):
-                # A new container can be unhashable where a key or set member
-                # was ([TokenType.BEGIN] in a set raises TypeError).
-                found[type(sub).__name__] += 1
-            elif isinstance(sub, ast.Constant):
-                # A constant of a new type where another operand stood (a list
-                # plus 1) raises TypeError; a changed value of the same type
-                # adds nothing here.
-                found[f"Constant.{type(sub.value).__name__}"] += 1
+            # raises. An operator's operands count by kind: a list plus 1
+            # raises TypeError where a list plus a list did not.
+            if isinstance(sub, ast.BinOp):
+                found[f"BinOp.{type(sub.op).__name__}"] += 1
+                for operand in (sub.left, sub.right):
+                    found[f"Operand.{_kind(operand)}"] += 1
+            elif isinstance(sub, ast.UnaryOp):
+                found[f"UnaryOp.{type(sub.op).__name__}"] += 1
+            elif isinstance(sub, (ast.Set, ast.Dict)):
+                # An unhashable set member or key ([TokenType.BEGIN] in a set)
+                # and unpacking a non-mapping ({**True}) raise TypeError.
+                members = sub.elts if isinstance(sub, ast.Set) else sub.keys
+                for member in members:
+                    if member is None:
+                        found["DictUnpack"] += 1
+                    elif isinstance(member, UNHASHABLE):
+                        found["Unhashable"] += 1
+            elif isinstance(sub, ast.Starred):
+                found["Starred"] += 1
             elif isinstance(sub, ast.Attribute):
                 found[f"Attribute.{ast.unparse(sub)}"] += 1
             elif isinstance(sub, ast.Subscript):
@@ -497,11 +515,16 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             if added_operations:
                 label = ", ".join(sorted(added_operations))
                 found.append(Binding(owner, f"<new {label}>", "class-call" if owner else "import-risk"))
-            # __all__ decides what a star import copies: changing it can leave
-            # a name missing in every module that star-imports this one.
-            changed_names = {name for node in (*olds, *news) for name, _ in _bound_names(node)}
-            if "__all__" in changed_names:
-                found.append(Binding(owner, "<__all__>", "class-call" if owner else "import-risk"))
+            # Special names act while the module or class is built: __all__
+            # decides what a star import copies, and a bad __slots__ entry
+            # stops the class from being created. A docstring does neither.
+            # Methods such as __init__ are compared as code, not here.
+            changed_names = {
+                name for node in (*olds, *news) for name, kind in _bound_names(node) if kind not in ("def", "class", "import", "doc")
+            }
+            special = sorted(name for name in changed_names if DUNDER.fullmatch(name))
+            if special:
+                found.append(Binding(owner, f"<{', '.join(special)}>", "class-call" if owner else "import-risk"))
             # A value whose kind changes (a dict made None) can break the code
             # that reads it at import, such as a metaclass building tables.
             old_kinds, new_kinds = _value_kinds(olds), _value_kinds(news)
