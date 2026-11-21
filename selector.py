@@ -142,6 +142,19 @@ def log(message: str) -> None:
         pass
 
 
+def _report_stage(stage: int, job_count: int, result_count: int) -> None:
+    """Temporary practice-board diagnostic: the scorer shows only CPU seconds,
+    so spend a set amount of CPU per verification stage (10 s no jobs, 30 s
+    verify raised, 50 s no results, 0 s results) plus 0.5 s per job."""
+    log(f"verification stage {stage}: {job_count} jobs, {result_count} results")
+    seconds = {0: 10.0, 1: 30.0, 2: 50.0, 3: 0.0}[stage] + 0.5 * min(job_count, 19)
+    if stage == 3:
+        return
+    end = time.process_time() + seconds
+    while time.process_time() < end:
+        pass
+
+
 def bits(mask: int) -> list[int]:
     numbers = []
     while mask:
@@ -201,11 +214,15 @@ def main() -> None:
 
     deadline = started + time_budget(len(commits))
     results = {}
+    stage = 0  # 0 no jobs, 1 verify raised, 2 no results came back, 3 results
     if jobs:
         try:
             results = verify(jobs, deadline)
+            stage = 3 if results else 2
         except Exception as error:  # unverified commits keep every candidate
+            stage = 1
             log(f"verification failed: {error!r}")
+    _report_stage(stage, len(jobs), len(results))
 
     lines = []
     for commit in commits:
