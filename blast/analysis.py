@@ -656,6 +656,45 @@ def _top_level_names(source_root: Path, path: str) -> set[str]:
 
 
 _direct_reader_cache: dict[tuple[Path, str], int] = {}
+_test_texts_cache: dict[Path, list[tuple[str, str]]] = {}
+_test_lines_cache: dict[tuple[Path, str], dict[int, str] | None] = {}
+
+
+def _test_texts(source_root: Path) -> list[tuple[str, str]]:
+    """(path, text) of every test file, read once, with each line break as
+    the parser counts it (CRLF, CR or LF) written as LF."""
+    if source_root not in _test_texts_cache:
+        texts = []
+        for file in sorted((source_root / "tests").rglob("*.py")):
+            try:
+                text = file.read_text("utf-8", errors="replace")
+            except OSError:
+                continue
+            texts.append((file.relative_to(source_root).as_posix(), text.replace("\r\n", "\n").replace("\r", "\n")))
+        _test_texts_cache[source_root] = texts
+    return _test_texts_cache[source_root]
+
+
+def _test_lines(source_root: Path, rel: str, text: str) -> dict[int, str] | None:
+    """Each line inside a test method of the file, mapped to that test's id;
+    None when the file does not parse. Parsed once per file."""
+    key = (source_root, rel)
+    if key not in _test_lines_cache:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            _test_lines_cache[key] = None
+            return None
+        lines: dict[int, str] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for method in node.body:
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name.startswith("test"):
+                    for number in range(method.lineno, (method.end_lineno or method.lineno) + 1):
+                        lines[number] = f"{rel}::{node.name}::{method.name}"
+        _test_lines_cache[key] = lines
+    return _test_lines_cache[key]
 
 
 def _tests_reading_attribute(source_root: Path, owner: tuple, name: str, coverage: "CoverageMap") -> int:
@@ -667,35 +706,26 @@ def _tests_reading_attribute(source_root: Path, owner: tuple, name: str, coverag
     if key in _direct_reader_cache:
         return _direct_reader_cache[key]
     pattern = re.compile(rf"\b{re.escape(dotted)}\b")
-    index = {test_id: bit for bit, test_id in enumerate(coverage.test_ids)}
+    index = None
     found = 0
-    for file in (source_root / "tests").rglob("*.py"):
-        try:
-            text = file.read_text("utf-8", errors="replace")
-        except OSError:
+    for rel, text in _test_texts(source_root):
+        if dotted not in text:
             continue
-        if not pattern.search(text):
-            continue
-        rel = file.relative_to(source_root).as_posix()
-        lines = text.splitlines()
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
+        tests_here = _test_lines(source_root, rel, text) if pattern.search(text) else {}
+        if tests_here is None:
             found |= coverage.tests_in_test_file(rel)
             continue
-        inside: set[int] = set()
-        for node in tree.body:
-            if not isinstance(node, ast.ClassDef):
+        number, start = 1, 0
+        for match in pattern.finditer(text):
+            number += text.count("\n", start, match.start())
+            start = match.start()
+            test_id = tests_here.get(number)
+            if test_id is None:
+                found |= coverage.tests_in_test_file(rel)
                 continue
-            for method in node.body:
-                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)) and method.name.startswith("test"):
-                    span = range(method.lineno, (method.end_lineno or method.lineno) + 1)
-                    inside.update(span)
-                    if pattern.search("\n".join(lines[span.start - 1: span.stop - 1])):
-                        test_id = f"{rel}::{node.name}::{method.name}"
-                        found |= 1 << index[test_id] if test_id in index else coverage.tests_in_test_file(rel)
-        if any(pattern.search(line) for number, line in enumerate(lines, 1) if number not in inside):
-            found |= coverage.tests_in_test_file(rel)
+            if index is None:
+                index = {test_id: bit for bit, test_id in enumerate(coverage.test_ids)}
+            found |= 1 << index[test_id] if test_id in index else coverage.tests_in_test_file(rel)
     _direct_reader_cache[key] = found
     return found
 
