@@ -113,7 +113,11 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     candidates -= kept
     if not verifiable:
         return kept | candidates, set(), set()
-    slow = {n for n in candidates if by_number[n]["seconds"] >= SLOW_SECONDS or by_number[n]["id"] in SUBPROCESS_TESTS}
+    # A local run cannot vouch for a test that starts its own process, so such
+    # a candidate is always listed, whatever the local run shows.
+    kept |= {n for n in candidates if by_number[n]["id"] in SUBPROCESS_TESTS}
+    candidates -= kept
+    slow = {n for n in candidates if by_number[n]["seconds"] >= SLOW_SECONDS}
     cheap = candidates - slow
     if not cheap:
         return kept | slow, set(), set()
@@ -171,6 +175,12 @@ def main() -> None:
     # Anything printed by accident lands on stderr, never among the answers.
     os.dup2(2, 1)
     sys.stdout = sys.stderr
+    # A stderr pipe nobody drains must never stall the run: a log line that
+    # does not fit is dropped (log() swallows BlockingIOError, an OSError).
+    try:
+        os.set_blocking(2, False)
+    except (OSError, AttributeError):
+        pass
 
     tests = json.loads((DATA / "tests.json").read_text("utf-8"))["tests"]
     all_numbers = sorted(test["number"] for test in tests)

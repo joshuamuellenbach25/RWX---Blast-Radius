@@ -258,6 +258,8 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int
         name = binding.name
         if binding.kind == "other":
             return everything, f"unreadable statement near {'.'.join(binding.owner) or 'module'}"
+        if binding.kind == "call":
+            return everything, "a changed module-level statement calls code at import"
         if binding.kind == "import":
             # An import's effect is the module it loads (dialect classes
             # register themselves when created), not the name it binds.

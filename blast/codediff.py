@@ -308,6 +308,19 @@ def _bound_names(node: ast.stmt) -> list[tuple[str, str]]:
     return found
 
 
+def _calls_code(node: ast.stmt) -> bool:
+    """Whether running this statement at import calls any code: a call can
+    import modules or register objects, effects no name binding shows. A def
+    runs its decorators and default values; a class its bases and keywords."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parts = [*node.decorator_list, *node.args.defaults, *(d for d in node.args.kw_defaults if d is not None)]
+    elif isinstance(node, ast.ClassDef):
+        parts = [*node.bases, *node.keywords, *node.decorator_list]
+    else:
+        parts = [node]
+    return any(isinstance(sub, ast.Call) for part in parts for sub in ast.walk(part))
+
+
 def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
     Function bodies are left out: bytecode comparison covers them."""
@@ -336,6 +349,12 @@ def changed_bindings(old_text: str, new_text: str) -> list[Binding]:
             for node in news:
                 for name, kind in _bound_names(node):
                     new_names.setdefault(name, kind)
+            # Module-level code runs once at import; a changed statement there
+            # that calls code can change state no name lookup reveals.
+            # (Class bodies are left to the name rules: their factory calls,
+            # such as rename_func("X") in TRANSFORMS, only build values.)
+            if not owner and any(_calls_code(node) for node in (*olds, *news)):
+                found.append(Binding(owner, "<call>", "call"))
             for name in old_names.keys() | new_names.keys():
                 kind, lines = old_names.get(name, (new_names.get(name), None))
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
