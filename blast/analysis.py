@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from blast.codediff import (
-    _declared_coding, _never_runs, changed_bindings, diff_python, enclosing_spans, parse_cached, statement_spans,
+    MUTATING_METHODS, _declared_coding, _never_runs, changed_bindings, diff_python, enclosing_spans, parse_cached,
+    statement_spans,
 )
 from blast.patch import FilePatch, PatchError, apply_file_patch, parse_patch
 
@@ -520,8 +521,8 @@ def analyze_python(
     # binding reading below covers; sqlglot imports no tests. A new class is
     # the exception: its metaclass runs as the tests are collected and can
     # register it for every test (a Dialect subclass).
-    test_module_names = path.startswith("tests/") and not any(
-        qualname in _class_qualnames(new_text) for qualname, _ in diff.unmatched
+    test_module_names = path.startswith("tests/") and not (
+        diff.unmatched and {qualname for qualname, _ in diff.unmatched} & _class_qualnames(new_text)
     )
     if runs_at_import or (diff.unmatched and not test_module_names):
         return FileVerdict(path, "module", everything, "changed code runs at import", new_text=new_text)
@@ -852,8 +853,11 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
         if not creators:
             # A test class's names reach only the tests of the test files
             # that load its module (sqlglot imports no tests), which the
-            # caller lists, and the code that reads them by name.
-            if path.startswith("tests/"):
+            # caller lists, and the code that reads them by name; unless a
+            # changed statement of that class calls code, whose effects on
+            # shared objects are unknown.
+            calls = any(other.kind == "class-call" and other.owner == binding.owner for other in bindings)
+            if path.startswith("tests/") and not calls:
                 tests |= readers | body
                 notes.append(f"{owner_key}.{name}: test class, readers")
                 continue
@@ -996,7 +1000,7 @@ def _shared_stores(changes, added: set[int]) -> set[str]:
         stack.extend(const for const in code.co_consts if hasattr(const, "co_code"))
         first = code.co_varnames[0] if code.co_argcount else None
         instructions = list(dis.get_instructions(code))
-        call_lines = set()
+        call_lines, mutate_lines = set(), set()
         for previous, instruction in zip([None, *instructions], instructions):
             line = instruction.positions.lineno if instruction.positions else None
             if line not in added:
@@ -1006,12 +1010,30 @@ def _shared_stores(changes, added: set[int]) -> set[str]:
                 owner = loaded[-1] if isinstance(loaded, tuple) else loaded
                 if not (previous is not None and previous.opname.startswith("LOAD_FAST") and owner == first):
                     names.add(instruction.argval)
+            elif instruction.opname == "LOAD_ATTR" and instruction.argval in MUTATING_METHODS and previous is not None:
+                # An in-place change (SnowflakeParser.FUNCTIONS.pop(...)):
+                # the changed object is the attribute or global loaded just
+                # before the method.
+                if previous.opname == "LOAD_ATTR" or previous.opname in ("LOAD_GLOBAL", "LOAD_NAME"):
+                    names.add(previous.argval)
+            elif instruction.opname in ("STORE_SUBSCR", "DELETE_SUBSCR"):
+                mutate_lines.add(line)
             elif instruction.opname in ("LOAD_GLOBAL", "LOAD_NAME") and instruction.argval in ("setattr", "delattr"):
                 call_lines.add(line)
-        for instruction in instructions:
-            if instruction.opname == "LOAD_CONST" and isinstance(instruction.argval, str) \
-                    and instruction.positions and instruction.positions.lineno in call_lines:
+        for previous, instruction in zip([None, *instructions], instructions):
+            line = instruction.positions.lineno if instruction.positions else None
+            if instruction.opname == "LOAD_CONST" and isinstance(instruction.argval, str) and line in call_lines:
                 names.add(instruction.argval)
+            # A subscript store or delete (SnowflakeParser.FUNCTIONS["X"] =
+            # f): every attribute or global its line loads, other than the
+            # test's own.
+            if line in mutate_lines and instruction.opname in ("LOAD_ATTR", "LOAD_GLOBAL", "LOAD_NAME"):
+                loaded = previous.argval if previous is not None else None
+                on_self = previous is not None and previous.opname.startswith("LOAD_FAST") and (
+                    loaded[-1] if isinstance(loaded, tuple) else loaded
+                ) == first
+                if not (instruction.opname == "LOAD_ATTR" and on_self):
+                    names.add(instruction.argval)
     return names
 
 

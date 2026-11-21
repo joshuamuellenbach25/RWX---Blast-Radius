@@ -794,6 +794,28 @@ def _element_shapes(nodes: list) -> dict[str, set[str]]:
     return shapes
 
 
+MUTATING_METHODS = frozenset({
+    "pop", "popitem", "update", "setdefault", "clear", "append", "extend", "insert", "remove",
+    "add", "discard", "sort", "reverse", "register", "__setitem__", "__delitem__",
+})
+
+
+def _changes_shared_state(node: ast.AST, own: set[str]) -> bool:
+    """Whether a statement calls a method that changes an object the body
+    does not bind itself (SnowflakeParser.FUNCTIONS.pop(...)), or calls
+    setattr or delattr."""
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        if isinstance(func, ast.Name) and func.id in ("setattr", "delattr"):
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in MUTATING_METHODS:
+            if not (isinstance(func.value, ast.Name) and func.value.id in own):
+                return True
+    return False
+
+
 def changed_bindings(old_text: str, new_text: str, star_names: set[str] | None = None) -> list[Binding]:
     """Names bound by module-level and class-level statements that differ.
     Function bodies are left out: bytecode comparison covers them.
@@ -902,7 +924,12 @@ def changed_bindings(old_text: str, new_text: str, star_names: set[str] | None =
             # class body the call can raise at import and break every test
             # that loads the file, so those statements add the file's tests.
             if any(_calls_code(node) for node in (*olds, *news)):
-                found.append(Binding(owner, "<call>", "class-call" if owner else "call"))
+                # A call that changes an object this class body does not bind
+                # itself (SnowflakeParser.FUNCTIONS.pop(...)) reaches every
+                # test that reads that object: a module-level call.
+                own = new_body_binds | {name for node in old_body for name in _binds(node)}
+                shared = any(_changes_shared_state(node, own) for node in (*olds, *news))
+                found.append(Binding(owner, "<call>", "class-call" if owner and not shared else "call"))
             for name in old_names.keys() | new_names.keys():
                 kind, lines = old_names.get(name, (new_names.get(name), None))
                 found.append(Binding(owner, name, kind or "other", lines, added=name not in old_names))
