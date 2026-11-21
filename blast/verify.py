@@ -97,9 +97,11 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             if remaining < 5:
                 print(f"{job.commit}: no time left", file=sys.stderr, flush=True)
                 continue
-            # Sized from recorded time, so a hang in setUpClass or in C code
-            # (where no test timer can act) ends after a bounded spend.
-            budget = min(remaining, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests))
+            # Bounded, so a hang in setUpClass or in C code (where no test
+            # timer can act) ends; at least 90 s, because the recorded seconds
+            # leave out class setup: 2haz used 27 s of CPU for 9 s recorded
+            # and a loaded run killed it at 10 s + 3x recorded = 38 s.
+            budget = min(remaining, max(90.0, 10.0 + 3.0 * sum(test["seconds"] for test in job.tests)))
             try:
                 child = os.fork()
             except OSError as error:  # this commit keeps every candidate; try the next
