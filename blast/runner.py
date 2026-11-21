@@ -146,6 +146,17 @@ def unittest_id(test: dict) -> str:
     return f"{module}.{class_name}.{method}"
 
 
+def order_tests(tests: list[dict]) -> list[dict]:
+    """Each class's tests run together, or unittest would repeat the class
+    setup. Classes keep the order of their first test in `tests`, which the
+    selector sorts cheapest setup first; inside a class the shortest test
+    runs first."""
+    class_rank: dict[str, int] = {}
+    for test in tests:
+        class_rank.setdefault(test["id"].rsplit("::", 1)[0], len(class_rank))
+    return sorted(tests, key=lambda test: (class_rank[test["id"].rsplit("::", 1)[0]], test["seconds"]))
+
+
 def run_tests(
     tests: list[dict], limits_by_number: dict[int, float], stop_at_first_failure: bool = False
 ) -> tuple[set[int], dict]:
@@ -162,8 +173,7 @@ def run_tests(
     failed: set[int] = set()
     suite = unittest.TestSuite()
     modules = []
-    ordered = sorted(tests, key=lambda test: (test["file"], test["id"].split("::")[1], test["seconds"]))
-    for test in ordered:
+    for test in order_tests(tests):
         module_name = test["file"][: -len(".py")].replace("/", ".")
         _, class_name, method = test["id"].split("::")
         try:
@@ -192,7 +202,8 @@ def run_tests(
         "run": recorder.testsRun,
         "failures": len(recorder.failures),
         "errors": len(recorder.errors),
-        "complete": recorder.testsRun >= len(tests) and not recorder.shouldStop,
+        # Every test ran, even when the last one failed and set shouldStop.
+        "complete": recorder.testsRun >= len(tests),
     }
     return failed, summary
 

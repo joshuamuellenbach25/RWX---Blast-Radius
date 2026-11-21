@@ -59,6 +59,24 @@ def _run_cost_ms(numbers: set[int], by_number: dict) -> int:
     return setups + sum(_duration_ms(by_number[n]) for n in numbers)
 
 
+def run_order(numbers: set[int], by_number: dict) -> list[dict]:
+    """The tests of a local run, cheapest class setup first: a run stops at
+    its first failure, so a costly setup (TestExecutor loads the TPC-H and
+    TPC-DS tables) is paid only when every cheaper class passed."""
+    tests = [by_number[n] for n in numbers]
+    class_seconds: dict[str, float] = {}
+    for test in tests:
+        name = test["id"].rsplit("::", 1)[0]
+        class_seconds[name] = class_seconds.get(name, 0.0) + test["seconds"]
+
+    def key(test: dict) -> tuple:
+        name = test["id"].rsplit("::", 1)[0]
+        setup = CLASS_SETUP_MS.get(name, DEFAULT_CLASS_SETUP_MS)
+        return (setup, class_seconds[name], name, test["seconds"], test["number"])
+
+    return sorted(tests, key=key)
+
+
 def time_budget(commit_count: int) -> float:
     """Seconds of wall time the whole batch may use, 60% of the run limit:
     3 minutes for practice-sized batches, 4.5 minutes for the final's."""
@@ -105,7 +123,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     saving_ms = _cost_ms(kept | cheap | slow, by_number) - _cost_ms(kept, by_number)
     if _run_cost_ms(cheap, by_number) > RUN_SHARE * saving_ms:
         return kept | cheap | slow, set(), set()
-    run = [by_number[n] for n in sorted(cheap)]
+    run = run_order(cheap, by_number)
     modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
     jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules))
     return kept, cheap, slow
