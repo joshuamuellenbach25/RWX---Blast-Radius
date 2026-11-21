@@ -238,6 +238,13 @@ def analyze_python(
     except SyntaxError as error:
         return FileVerdict(path, "module", everything, f"cannot compare statements: {error}", new_text=new_text)
     tests, notes = _binding_candidates(path, bindings, coverage, source_root)
+    if path.startswith("tests/"):
+        # A test module's own statements set up its tests (a lifecycle method
+        # assigned after its class, a shared helper) and those of every test
+        # file that imports it.
+        for test_file in {path, *_test_files_loading(source_root, path)}:
+            tests |= coverage.tests_in_test_file(test_file)
+        notes += "; every test of the test files that load it"
     return FileVerdict(
         path, "module", tests | function_tests, f"{notes}; {function_note}", function_changes, new_text
     )
@@ -409,7 +416,27 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap, source_root:
     return tests, "; ".join(notes)
 
 
-def _insertion_points(patch) -> set[int]:
+_LITERAL_START = re.compile(r"""^[rRbBuUfF]{0,2}['"]""")
+
+
+def _inert_old_lines(patch, old_text: str) -> set[int]:
+    """Old lines the patch removes that run nothing: bare constant statements
+    such as docstrings. The file is parsed only when a removed line starts a
+    string literal."""
+    if not any(
+        line[:1] == "-" and _LITERAL_START.match(line[1:].strip())
+        for hunk in patch.hunks
+        for line in hunk.lines
+    ):
+        return set()
+    inert: set[int] = set()
+    for node in ast.walk(ast.parse(old_text)):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            inert.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return inert
+
+
+def _insertion_points(patch, inert: set[int] | frozenset[int] = frozenset()) -> set[int]:
     """Old line numbers where the patch adds code that can run on paths the
     old lines there never ran on: a run of only added lines, or a run whose
     added lines sit left of its removed ones (a statement moved out of its
@@ -426,16 +453,16 @@ def _insertion_points(patch) -> set[int]:
             if tag in "-+":
                 if not in_run:
                     start, in_run = old_line, True
-                # Blank and comment lines run nothing: a blank line replaced
-                # by a statement is an insertion.
+                # Blank, comment and docstring lines run nothing: one of them
+                # replaced by a statement is an insertion.
                 text = line[1:]
                 code = text.strip() and not text.strip().startswith("#")
                 indent = len(text) - len(text.lstrip(" \t")) if code else None
                 if tag == "-":
-                    old_line += 1
-                    if indent is not None:
+                    if indent is not None and old_line not in inert:
                         removed = True
                         removed_indent = indent if removed_indent is None else min(removed_indent, indent)
+                    old_line += 1
                 elif indent is not None:
                     added = True
                     added_indent = indent if added_indent is None else min(added_indent, indent)
@@ -470,7 +497,7 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
     if not changes:
         return 0, "", False
     changed_lines = patch.changed_old_lines()
-    insertions = _insertion_points(patch)
+    insertions = _insertion_points(patch, _inert_old_lines(patch, old_text))
     tree = None
     own_lines: set[int] = set()
     fallback = 0
