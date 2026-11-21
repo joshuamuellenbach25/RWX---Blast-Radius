@@ -173,6 +173,15 @@ def bits(mask: int) -> list[int]:
 
 def main() -> None:
     started = time.monotonic()
+    # A closed stderr would lend its number to the answers' copy of stdout
+    # below, putting every log line among the answers: point it at null.
+    try:
+        os.fstat(2)
+    except OSError:
+        null = os.open(os.devnull, os.O_WRONLY)
+        if null != 2:
+            os.dup2(null, 2)
+            os.close(null)
     answer_fd = os.dup(1)
     # Anything printed by accident lands on stderr, never among the answers.
     os.dup2(2, 1)
