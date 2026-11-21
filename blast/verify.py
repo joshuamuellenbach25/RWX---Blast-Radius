@@ -257,12 +257,14 @@ def _warm_worker(jobs: list[Job], deadline: float) -> None:
             pid, _, usage = os.wait4(child, os.WNOHANG)
             if pid:
                 del running[child]
+                (RESULTS / f"{job.commit}.spec.json").unlink(missing_ok=True)  # a fresh child that died before reading it
                 cpu = usage.ru_utime + usage.ru_stime
                 print(f"{job.commit}: child done in {time.monotonic() - child_started:.1f} s, {cpu:.2f} s CPU", file=sys.stderr, flush=True)
             elif time.monotonic() - child_started > budget:
                 os.kill(child, signal.SIGKILL)
                 os.waitpid(child, 0)
                 del running[child]
+                (RESULTS / f"{job.commit}.spec.json").unlink(missing_ok=True)
                 print(f"{job.commit}: killed after {budget:.0f} s", file=sys.stderr, flush=True)
         # CPU counts toward the score and wall time does not, so poll slowly.
         time.sleep(0.05)

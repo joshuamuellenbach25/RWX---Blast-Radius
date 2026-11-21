@@ -31,6 +31,8 @@ def main(spec_path: str) -> None:
     code = 0
     try:
         spec = json.loads(Path(spec_path).read_text("utf-8"))
+        # The spec holds whole patched files and /tmp has 64 MB: gone once read.
+        Path(spec_path).unlink(missing_ok=True)
         root = spec["root"]
         os.chdir(root)
         if root not in sys.path:
