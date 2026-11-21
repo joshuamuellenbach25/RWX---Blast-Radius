@@ -18,7 +18,23 @@ def _round_trip(value):
 
 
 class InlineProcessPool:
-    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), **_options):
+    def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), *, max_tasks_per_child=None):
+        # The real pool's checks on its arguments (Python 3.13 under Linux),
+        # so a call that it refuses is refused here too.
+        if max_workers is not None and max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
+        if initializer is not None and not callable(initializer):
+            raise TypeError("initializer must be a callable")
+        if max_tasks_per_child is not None:
+            if not isinstance(max_tasks_per_child, int):
+                raise TypeError("max_tasks_per_child must be an integer")
+            if max_tasks_per_child <= 0:
+                raise ValueError("max_tasks_per_child must be >= 1")
+            if mp_context is not None and mp_context.get_start_method(allow_none=False) == "fork":
+                raise ValueError(
+                    "max_tasks_per_child is incompatible with the 'fork' multiprocessing start method;"
+                    " supply a different mp_context."
+                )
         self._initializer = initializer
         self._initargs = initargs
         self._initialized = False
