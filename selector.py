@@ -27,7 +27,7 @@ from blast.verify import Job, verify  # noqa: E402
 # Tests recorded at or above this many seconds are never run here: running
 # one costs about what listing it costs. They are listed only when a cheap
 # candidate fails, or when no cheap candidate exists.
-SLOW_SECONDS = 2.5
+SLOW_SECONDS = 7.0
 # Tests that start their own Python process see the files on disk, not the
 # patched code, so a run here proves nothing about them.
 SUBPROCESS_TESTS = {"tests/dialects/test_dialect.py::TestDialect::test_lazy_load"}
@@ -172,7 +172,9 @@ def main() -> None:
         if coverage is None:
             continue
         try:
-            text = (DATA / "commits" / f"{commit}.patch").read_text("utf-8", errors="replace")
+            # Strict decoding: a byte that is not UTF-8 makes the file fail to
+            # import on disk even inside a comment, so such a commit runs every test.
+            text = (DATA / "commits" / f"{commit}.patch").read_bytes().decode("utf-8")
             analysis = analyze(text, SOURCE_ROOT, coverage)
             notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)
             plans[commit] = plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit)

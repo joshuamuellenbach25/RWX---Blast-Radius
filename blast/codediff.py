@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import dis
 import inspect
+import re
 from dataclasses import dataclass, field
 from types import CodeType
 
@@ -28,7 +29,21 @@ class ChangedCode:
 
     @property
     def swappable(self) -> bool:
-        return self.is_function and self.old.co_freevars == self.new.co_freevars
+        # A decorator can read a function's signature once, at import (for
+        # example inspect.signature in sqlglot/executor/env.py), so a changed
+        # signature is not a body-only change.
+        return (
+            self.is_function
+            and self.old.co_freevars == self.new.co_freevars
+            and _signature(self.old) == _signature(self.new)
+        )
+
+
+def _signature(code: CodeType) -> tuple:
+    count = code.co_argcount + code.co_kwonlyargcount
+    flags = code.co_flags & (inspect.CO_VARARGS | inspect.CO_VARKEYWORDS)
+    count += bool(flags & inspect.CO_VARARGS) + bool(flags & inspect.CO_VARKEYWORDS)
+    return (code.co_argcount, code.co_posonlyargcount, code.co_kwonlyargcount, flags, code.co_varnames[:count])
 
 
 @dataclass
@@ -137,7 +152,18 @@ def compile_text(text: str, filename: str) -> CodeType:
     return compile(text, filename, "exec", dont_inherit=True, optimize=0)
 
 
+CODING_DECLARATION = re.compile(r"^[ \t\f]*#.*?coding[:=]")
+
+
+def _declared_coding(text: str) -> list[str]:
+    """PEP 263 lines among the first two: the import system honors them,
+    compile() of decoded text does not."""
+    return [line for line in text.split("\n")[:2] if CODING_DECLARATION.match(line)]
+
+
 def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
+    if _declared_coding(old_text) != _declared_coding(new_text):
+        return FileDiff(syntax_error=True)
     old_code = compile_text(old_text, filename)
     try:
         new_code = compile_text(new_text, filename)
@@ -161,6 +187,14 @@ def diff_python(old_text: str, new_text: str, filename: str) -> FileDiff:
         while parent is not None and old_tree[parent].co_flags & inspect.CO_OPTIMIZED:
             if parent not in changed_keys:
                 ancestor_keys.add(parent)
+            parent = parents.get(parent)
+        # A class body inside a function is rebuilt from that function's
+        # constants on every call, so swapping the method alone would not
+        # reach the objects tests create; such changes take the module path.
+        while parent is not None:
+            if old_tree[parent].co_flags & inspect.CO_OPTIMIZED:
+                result.unmatched.append(change.path)
+                break
             parent = parents.get(parent)
     for key in sorted(ancestor_keys):
         if key in new_tree:

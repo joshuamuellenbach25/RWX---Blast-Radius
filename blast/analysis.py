@@ -165,7 +165,9 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
     path = patch.path
     everything = coverage.all_tests
     inside = any(
-        candidate.startswith(("sqlglot/", "tests/")) or candidate in RUNNER_CONFIG
+        candidate.startswith(("sqlglot/", "tests/"))
+        or candidate in RUNNER_CONFIG
+        or candidate.rsplit("/", 1)[-1] == "conftest.py"
         for candidate in patch.paths
     )
     readers = 0
@@ -192,7 +194,7 @@ def analyze_file(patch: FilePatch, source_root: Path, coverage: CoverageMap) -> 
     except (OSError, UnicodeDecodeError, PatchError) as error:
         return FileVerdict(path, "unknown", everything, f"cannot apply: {error}")
 
-    if path in RUNNER_CONFIG:
+    if path in RUNNER_CONFIG or path.rsplit("/", 1)[-1] == "conftest.py":
         return FileVerdict(path, "unknown", everything, "runner configuration", new_text=new_text)
 
     if path.endswith(".py") and path.startswith(("sqlglot/", "tests/")):
@@ -256,6 +258,10 @@ def _binding_candidates(path: str, bindings, coverage: CoverageMap) -> tuple[int
         name = binding.name
         if binding.kind == "other":
             return everything, f"unreadable statement near {'.'.join(binding.owner) or 'module'}"
+        if binding.kind == "import":
+            # An import's effect is the module it loads (dialect classes
+            # register themselves when created), not the name it binds.
+            return everything, f"import statement changed near {name}"
         if binding.kind == "doc":
             notes.append(f"{'.'.join(binding.owner)}.__doc__")
             continue
