@@ -157,6 +157,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     candidates -= kept
     if not verifiable:
         _add_import_check(analysis, kept | candidates, by_number, jobs, commit)
+        _UNRUN_WHY[commit] = 0  # diagnostic
         return kept | candidates, set(), set()
     # A local run cannot vouch for a test that starts its own process, so such
     # a candidate is always listed, whatever the local run shows.
@@ -171,6 +172,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     if not cheap:
         if fresh:
             _add_import_check(analysis, kept | slow, by_number, jobs, commit)
+        _UNRUN_WHY[commit] = 1  # diagnostic
         return kept | slow, set(), set()
     # Run only when it pays: a clean run saves what listing the candidates
     # would cost, a failing run saves nothing, and every run costs about the
@@ -194,6 +196,7 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
     if best is None:
         if fresh:
             _add_import_check(analysis, kept | cheap | slow, by_number, jobs, commit)
+        _UNRUN_WHY[commit] = 2  # diagnostic
         return kept | cheap | slow, set(), set()
     kept, cheap, slow = best
     run = run_order(cheap, by_number)
@@ -283,18 +286,23 @@ def bits(mask: int) -> list[int]:
     return numbers
 
 
+# Temporary practice-board diagnostic: commit -> why plan_commit planned no
+# run (0 not verifiable, 1 no cheap candidate, 2 the gate refused).
+_UNRUN_WHY: dict[str, int] = {}
+
+
 def _fleet_code(costly) -> int:
-    """Temporary practice-board diagnostic: commits whose list costs at
-    least 20 s, by cause, in 12 bits. Bits 0-1 lists of 1000 tests or more;
-    2-4 a run that failed, so its slow tests are listed (at most 7); 5 any
-    clean run that still keeps a costly list; 6-7 a planned run with no
-    usable result; 8-9 no planned run, with a module-level change; 10-11 no
-    planned run otherwise (each 2-bit count at most 3)."""
+    """Temporary practice-board diagnostic v7, 12 bits. Bits 0-1 the number
+    of lists of 1000 tests or more (at most 3); for the first one, bits 2-3
+    its run (0 none, 1 failed, 2 clean or no result, 3 import check failed
+    or gave no answer) and 4-5 its analysis (0 fallback, 1 an unknown
+    verdict, 2 a module or moved verdict, 3 other). Bits 6-7 the number of
+    other lists of at least 20 s with no run (at most 3); for the first one,
+    bits 8-9 why no run was planned (0 not verifiable, 1 no cheap candidate,
+    2 the gate refused, 3 no plan) and 10-11 its analysis (0 fallback, 1 an
+    unknown verdict, 2 a fixture or other file, 3 code or tests only)."""
     log(f"fleet costly lists: {costly}")
-    return (
-        min(costly[0], 3) | min(costly[1], 7) << 2 | min(costly[2], 1) << 5 | min(costly[3], 3) << 6
-        | min(costly[4], 3) << 8 | min(costly[5], 3) << 10
-    )
+    return min(costly[0], 3) | costly[1] << 2 | costly[2] << 4 | min(costly[3], 3) << 6 | costly[4] << 8 | costly[5] << 10
 
 
 def _pad_to(answered, code, duration_ms) -> None:
@@ -426,7 +434,7 @@ def main() -> None:
     # has a changed module body nothing ran: unknown, so every test.
     checked = {job.commit for job in jobs if job.sources}
     answered = []  # (commit, workers, cost) for the diagnostic padding
-    costly = [0] * 6  # diagnostic: lists costing at least 20 s, see _fleet_code
+    costly = [0] * 6  # diagnostic v7: costly lists and their causes, see _fleet_code
     for commit in commits:
         kept, cheap, slow = plans[commit]
         result = results.get(commit)
@@ -434,9 +442,11 @@ def main() -> None:
         if result and result.get("import_failed"):
             chosen = set(all_numbers)
             how = f"patched {result['import_failed']} fails to import"
+            kind = "import"
         elif commit in checked and not result:
             chosen = set(all_numbers)
             how = "import check gave no answer"
+            kind = "import"
         elif cheap and result and result.get("ok"):
             failed = set(result["failed"]) & cheap
             complete = bool(result.get("summary", {}).get("complete"))
@@ -460,20 +470,25 @@ def main() -> None:
         ordered = sorted(chosen)
         cost, workers = pack(ordered, duration_ms)
         if cost >= 20000:
+            note = notes[commit]
             if len(ordered) >= 1000:
                 costly[0] += 1
-            elif kind == "failed":
-                costly[1] += 1
-            elif kind == "clean":
-                costly[2] += 1
-            elif kind == "noresult":
+                if costly[0] == 1:
+                    costly[1] = {"unrun": 0, "failed": 1, "import": 3}.get(kind, 2)
+                    costly[2] = (
+                        0 if note.startswith("fallback") else 1 if "unknown:" in note
+                        else 2 if "module:" in note or "moved:" in note else 3
+                    )
+            elif kind == "unrun":
                 costly[3] += 1
-            elif "module:" in notes[commit]:
-                costly[4] += 1
-            else:
-                costly[5] += 1
+                if costly[3] == 1:
+                    costly[4] = _UNRUN_WHY.get(commit, 3)
+                    costly[5] = (
+                        0 if note.startswith("fallback") else 1 if "unknown:" in note
+                        else 2 if "fixture:" in note or "other:" in note else 3
+                    )
         answered.append((commit, workers, cost))
-        log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
+        log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}] why {_UNRUN_WHY.get(commit, 3)}")
 
     code = _fleet_code(costly)
     _pad_to(answered, code, duration_ms)
