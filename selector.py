@@ -163,30 +163,32 @@ def _report_stage(stage: int, job_count: int, result_count: int, commit_count: i
 
 
 def _large_reason(analysis) -> int:
-    """Diagnostic: why a commit lists nearly every test, from the first
-    verdict that lists at least 1000: 1 a file added, deleted or renamed in
-    the package or the tests, 2 changed code that runs at import, 3 another
-    module verdict or no single verdict that large, 4 another unknown
-    verdict. 0 is left for commits never analyzed."""
-    for verdict in analysis.files:
-        if verdict.tests.bit_count() < 1000:
-            continue
-        if verdict.kind == "unknown":
-            return 1 if verdict.note.startswith("file added") else 4
-        if verdict.kind == "module":
-            return 2 if verdict.note == "changed code runs at import" else 3
-    return 3
+    """Diagnostic: the kind of verdict behind a costly list, the first that
+    applies: 1 a file added, deleted or renamed in the package or the
+    tests, 2 changed code that runs at import, 3 another module verdict, 4
+    another unknown verdict, 5 none of these. 0 is left for commits never
+    analyzed."""
+    found = [(verdict.kind, verdict.note) for verdict in analysis.files]
+    if any(kind == "unknown" and note.startswith("file added") for kind, note in found):
+        return 1
+    if any(kind == "module" and note == "changed code runs at import" for kind, note in found):
+        return 2
+    if any(kind == "module" for kind, _ in found):
+        return 3
+    if any(kind == "unknown" for kind, _ in found):
+        return 4
+    return 5
 
 
 def _add_fleet_signal(answered, large, duration_ms) -> None:
     """Temporary practice-board diagnostic. The board shows only totals, to
     the millisecond per run, so tests whose recorded milliseconds add up to
     the code go on the busiest worker of the first commit that lists any
-    test. The code holds seven counts of 2 bits each (at most 3): commits
-    listing at least 1000 tests never analyzed, then by reason 1 to 4 (see
-    _large_reason), then commits with no planned run listing 100 to 999
-    tests, then commits whose planned run returned no result. At most
-    16383 ms, and no test that can fail is left out."""
+    test. The code holds seven counts of 2 bits each (at most 3), all of
+    commits with no local run result: never analyzed, then those whose
+    list costs at least 20 s by reason 1 to 5 (see _large_reason), then
+    those whose planned run returned no result. At most 16383 ms, and no
+    test that can fail is left out."""
     code = sum(min(count, 3) << (2 * index) for index, count in enumerate(large))
     for commit, workers in answered:
         if not workers:
@@ -334,12 +336,13 @@ def main() -> None:
             failed_ms += cost
         elif category == "unrun":
             unrun_ms += cost
-        if category == "unrun" and commit in planned:
-            large[6] += 1
-        elif len(ordered) >= 1000:
-            large[reasons.get(commit, 0)] += 1
-        elif category == "unrun" and len(ordered) >= 100:
-            large[5] += 1
+        if category == "unrun":
+            if commit in planned:
+                large[6] += 1
+            elif commit not in reasons:
+                large[0] += 1
+            elif cost >= 20000:
+                large[reasons[commit]] += 1
         answered.append((commit, workers))
         log(f"{commit}: {len(ordered)} tests, {cost / 1000:.2f} s, {how} [{notes[commit]}]")
 
