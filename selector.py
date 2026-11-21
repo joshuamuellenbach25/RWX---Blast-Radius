@@ -44,6 +44,10 @@ CLASS_SETUP_MS = {
     "tests/test_optimizer.py::TestOptimizer": 500,
 }
 DEFAULT_CLASS_SETUP_MS = 50
+# CPU of a test in a run over its recorded seconds, where far from 1: under the
+# scorer's flags TestOptimizer.test_tpcds ran 8.6 s for 2.232 s recorded, and
+# 2haz's run (25 TestOptimizer tests, 8.61 s recorded) cost 27.3 s of CPU.
+RUN_FACTOR = {"tests/test_optimizer.py::TestOptimizer": 3.0}
 # A patch past this size lists every test unread: reading and decoding it
 # could exhaust the run's 4 GB before the analysis timer can act.
 MAX_PATCH_BYTES = 16 * 1024 * 1024
@@ -58,10 +62,16 @@ def _cost_ms(numbers: set[int], by_number: dict) -> int:
     return cost
 
 
+def _class_of(test: dict) -> str:
+    return test["id"].rsplit("::", 1)[0]
+
+
 def _run_cost_ms(numbers: set[int], by_number: dict) -> int:
-    classes = {by_number[n]["id"].rsplit("::", 1)[0] for n in numbers}
+    classes = {_class_of(by_number[n]) for n in numbers}
     setups = sum(CLASS_SETUP_MS.get(name, DEFAULT_CLASS_SETUP_MS) for name in classes)
-    return setups + sum(_duration_ms(by_number[n]) for n in numbers)
+    return setups + sum(
+        _duration_ms(by_number[n]) * RUN_FACTOR.get(_class_of(by_number[n]), 1.0) for n in numbers
+    )
 
 
 def run_order(numbers: set[int], by_number: dict) -> list[dict]:
@@ -138,10 +148,26 @@ def plan_commit(analysis, translate, unknown_tests, by_number, jobs, commit):
         return kept | slow, set(), set()
     # Run only when it pays: a clean run saves what listing the candidates
     # would cost, a failing run saves nothing, and every run costs about the
-    # recorded seconds of its tests plus their class setups in CPU.
-    saving_ms = _cost_ms(kept | cheap | slow, by_number) - _cost_ms(kept, by_number)
-    if _run_cost_ms(cheap, by_number) > RUN_SHARE * saving_ms:
+    # recorded seconds of its tests (times RUN_FACTOR) plus their class
+    # setups in CPU. A second plan lists the tests that cost far more to run
+    # than to list and runs the rest; a slow test is then left out only when
+    # a cheap test of its own class ran.
+    plans = [(kept, cheap, slow)]
+    costly = {n for n in cheap if _class_of(by_number[n]) in RUN_FACTOR}
+    if costly and cheap - costly:
+        run_classes = {_class_of(by_number[n]) for n in cheap - costly}
+        unproxied = {n for n in slow if _class_of(by_number[n]) not in run_classes}
+        plans.append((kept | costly | unproxied, cheap - costly, slow - unproxied))
+    listed_ms = _cost_ms(kept | cheap | slow, by_number)
+    best, best_margin = None, 0.0
+    for plan_kept, plan_run, plan_slow in plans:
+        saving_ms = listed_ms - _cost_ms(plan_kept, by_number)
+        margin = RUN_SHARE * saving_ms - _run_cost_ms(plan_run, by_number)
+        if margin >= best_margin:
+            best, best_margin = (plan_kept, plan_run, plan_slow), margin
+    if best is None:
         return kept | cheap | slow, set(), set()
+    kept, cheap, slow = best
     run = run_order(cheap, by_number)
     modules |= {by_number[n]["file"][: -len(".py")].replace("/", ".") for n in cheap}
     jobs.append(Job(commit=commit, tests=run, pairs=pairs, required=required, modules=modules))
