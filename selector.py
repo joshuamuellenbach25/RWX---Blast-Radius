@@ -44,6 +44,9 @@ CLASS_SETUP_MS = {
     "tests/test_optimizer.py::TestOptimizer": 500,
 }
 DEFAULT_CLASS_SETUP_MS = 50
+# A patch past this size lists every test unread: reading and decoding it
+# could exhaust the run's 4 GB before the analysis timer can act.
+MAX_PATCH_BYTES = 16 * 1024 * 1024
 
 
 def _duration_ms(test: dict) -> int:
@@ -263,10 +266,14 @@ def main() -> None:
         if time.monotonic() > analysis_end:
             notes[commit] = "fallback: analysis time used up"
             continue
+        patch_path = DATA / "commits" / f"{commit}.patch"
+        if patch_path.stat().st_size > MAX_PATCH_BYTES:
+            notes[commit] = "fallback: patch too large to read"
+            continue
         try:
             # Strict decoding: a byte that is not UTF-8 makes the file fail to
             # import on disk even inside a comment, so such a commit runs every test.
-            text = (DATA / "commits" / f"{commit}.patch").read_bytes().decode("utf-8")
+            text = patch_path.read_bytes().decode("utf-8")
             with _time_limit(analysis_end - time.monotonic()):
                 analysis = analyze(text, SOURCE_ROOT, coverage)
             notes[commit] = ",".join(f"{verdict.kind}:{verdict.path}" for verdict in analysis.files)

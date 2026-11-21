@@ -560,11 +560,16 @@ def _function_candidates(path, old_text, patch, changes, coverage) -> tuple[int,
         # spot, which the neighboring lines' tests can miss (an insertion
         # after an error branch is reached by every normal call). Such a
         # change also lists every test that called the function.
+        # A name the old code read as a global or builtin that the new code
+        # binds locally (`int := None`) makes every earlier read of it raise.
+        new_locals = set(change.new.co_varnames) | set(change.new.co_cellvars)
+        old_locals = set(change.old.co_varnames) | set(change.old.co_cellvars)
         reshaped = (
             (change.old.co_flags ^ change.new.co_flags) & RESHAPING_FLAGS
             or change.old.co_argcount != change.new.co_argcount
             or change.old.co_posonlyargcount != change.new.co_posonlyargcount
             or change.old.co_kwonlyargcount != change.new.co_kwonlyargcount
+            or (new_locals - old_locals) & set(change.old.co_names)
         )
         if own and (reshaped or any(min(own) <= point <= max(own) + 1 for point in insertions)):
             if tree is None:
