@@ -1,6 +1,6 @@
 # Status
 
-Updated 2026-11-21 04:52 EST. Main 1752c54 carries every reproduced fix from the code reviews through cfa81ba; the 30 sample plans are unchanged. Diagnostic BB-6D152AEF (04:02 EST, 256.2 s) showed no load errors and failing tests that pass on unpatched code: the practice commits break the tests the local runs check. Next practice slot, 05:02 EST: diagnostic a73870d, which splits the board seconds between commits whose local run failed and commits with no local run. Diagnostic 8c1a217 submitted at 03:01 EST as BB-E6219E9D.
+Updated 2026-11-21 05:08 EST. Diagnostic BB-DFCDC1FD (a73870d, 05:03 EST, 256.1 s, all three runs 254.087 s simulated) read code 46 over the 254.041 s base: about 224 of the 254 board seconds sit in commits that get no local run, and about 32 in commits whose local run fails. The next work narrows the lists of commits with no local run. Next practice slot, 06:03 EST. Main fe6eec0 carries every reproduced fix from the code reviews through 1cbccf9; the 30 sample plans are unchanged. Earlier diagnostics: BB-6D152AEF (04:02 EST) showed the practice commits break the tests the local runs check; BB-E6219E9D (03:01 EST).
 
 | Measure | Seconds |
 |---|---|
